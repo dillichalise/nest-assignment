@@ -12,21 +12,35 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
-    "lint:check": "eslint \"{src,test}/**/*.ts\""
+    "lint:check": "eslint \"{src,test}/**/*.ts\"",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "typeorm": "typeorm-ts-node-commonjs",
+    "migration:generate": "npm run typeorm -- -d src/database/data-source.ts migration:generate",
+    "migration:create": "npm run typeorm -- migration:create",
+    "migration:run": "npm run typeorm -- -d src/database/data-source.ts migration:run",
+    "migration:revert": "npm run typeorm -- -d src/database/data-source.ts migration:revert"
   },
   "author": "Dilli Chalise",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@nestjs/bullmq": "^11.0.5",
     "@nestjs/common": "^11.2.7",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.2.7",
     "@nestjs/platform-express": "^11.2.7",
     "@nestjs/swagger": "^11.4.7",
+    "@nestjs/typeorm": "^11.0.3",
+    "bullmq": "^6.3.11",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "dotenv": "^18.0.6",
+    "ioredis": "^5.11.1",
+    "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "typeorm": "^1.1.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -44,6 +58,7 @@
     "prettier": "^3.9.9",
     "supertest": "^7.3.1",
     "ts-jest": "^29.4.14",
+    "ts-node": "^10.9.2",
     "typescript": "~5.9",
     "typescript-eslint": "^8.71.1"
   },
