@@ -11,5 +11,7 @@ export const buildDataSourceOptions = (
   database: env.DB_NAME ?? 'merchant_platform',
   entities: [__dirname + '/../**/*.entity{.ts,.js}'],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
+  // gen_random_uuid() for uuid primary keys
+  uuidExtension: 'pgcrypto',
   synchronize: false,
 });
