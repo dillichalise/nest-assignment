@@ -1,12 +1,4 @@
-import {
-  Body,
-  Controller,
-  Get,
-  HttpCode,
-  Post,
-  Req,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Req } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOkResponse,
@@ -19,13 +11,14 @@ import { AuthService } from './auth.service';
 import { LoginResponseDto } from './dto/login-response.dto';
 import { LoginDto } from './dto/login.dto';
 import { MeResponseDto } from './dto/me-response.dto';
-import { JwtAuthGuard } from './jwt-auth.guard';
+import { Public } from './decorators/public.decorator';
 
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
+  @Public()
   @Post('login')
   @HttpCode(200)
   @ApiOperation({ summary: 'Exchange credentials for a JWT' })
@@ -36,7 +29,6 @@ export class AuthController {
   }
 
   @Get('me')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Current authenticated user' })
   @ApiOkResponse({ type: MeResponseDto })

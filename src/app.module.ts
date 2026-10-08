@@ -6,6 +6,7 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
+import { PoliciesModule } from './policies/policies.module';
 import { QueueModule } from './queue/queue.module';
 
 @Module({
@@ -14,6 +15,7 @@ import { QueueModule } from './queue/queue.module';
     DatabaseModule,
     QueueModule,
     AuthModule,
+    PoliciesModule,
     HealthModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: AllExceptionsFilter }],
