@@ -29,7 +29,7 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
     businessType: 'retail',
     ownerName: 'Cafe Owner',
     ownerEmail: 'cafeowner@example.com',
-    ownerPhone: '+977',
+    ownerPhone: '+977 9876543210',
     ownerTaxId: '123-456-789',
     monthlyVolume: 25000,
     averageTicketSize: 42.5,
@@ -151,7 +151,7 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
         averageTicketSize: '42.50',
         currency: 'USD',
       });
-      expect(res.body.ownerTaxId).toBe('*******6789');
+      expect(res.body.ownerTaxId).toBe('*******-789');
       expect(JSON.stringify(res.body)).not.toContain('123-456-789');
     });
 
