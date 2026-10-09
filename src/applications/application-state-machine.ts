@@ -22,7 +22,7 @@ const TRANSITIONS: Readonly<Record<S, readonly S[]>> = {
 };
 
 /** Statuses in which the sales user may still change the application's data. */
-const EDITABLE: readonly S[] = [S.DRAFT, S.INFO_REQUESTED];
+export const EDITABLE_STATUSES: readonly S[] = [S.DRAFT, S.INFO_REQUESTED];
 
 export const canTransition = (from: S, to: S): boolean =>
   TRANSITIONS[from].includes(to);
@@ -33,7 +33,8 @@ export const assertTransition = (from: S, to: S): void => {
   }
 };
 
-export const isEditable = (status: S): boolean => EDITABLE.includes(status);
+export const isEditable = (status: S): boolean =>
+  EDITABLE_STATUSES.includes(status);
 
 export const isTerminal = (status: S): boolean =>
   TRANSITIONS[status].length === 0;

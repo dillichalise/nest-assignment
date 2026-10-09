@@ -43,6 +43,38 @@ describe('PolicyService', () => {
     });
   });
 
+  describe('applicationScope (list filter)', () => {
+    it('ADMIN is unscoped, SALES by creator, REVIEWER by assignment', () => {
+      expect(policy.applicationScope(admin)).toEqual({});
+      expect(policy.applicationScope(salesA)).toEqual({
+        createdById: 'salesA',
+      });
+      expect(policy.applicationScope(reviewer1)).toEqual({
+        assignedReviewerId: 'rev1',
+      });
+    });
+
+    it('is consistent with canViewApplication for every user and application', () => {
+      const apps: ApplicationAccessSubject[] = [app, unassigned];
+      const matches = (u: AuthUser, a: ApplicationAccessSubject) => {
+        const scope = policy.applicationScope(u);
+        return Object.entries(scope).every(
+          ([k, v]) => a[k as keyof ApplicationAccessSubject] === v,
+        );
+      };
+      for (const u of [admin, salesA, salesB, reviewer1, reviewer2]) {
+        for (const a of apps) {
+          expect(matches(u, a)).toBe(policy.canViewApplication(u, a));
+        }
+      }
+    });
+
+    it('fails closed for an unknown role', () => {
+      const ghost = { id: 'x', email: 'x', role: 'GHOST' as Role };
+      expect(() => policy.applicationScope(ghost)).toThrow(ForbiddenException);
+    });
+  });
+
   describe('edit', () => {
     it.each([
       ['ADMIN', admin, true],

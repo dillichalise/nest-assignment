@@ -11,6 +11,12 @@ export interface ApplicationAccessSubject {
   assignedReviewerId: string | null;
 }
 
+/** Row filter equivalent to `canViewApplication` for list queries. */
+export interface ApplicationScope {
+  createdById?: string;
+  assignedReviewerId?: string;
+}
+
 /**
  * Object-level authorization rules. Role checks (guards) answer "may this role
  * call the endpoint at all"; these answer "may this user touch THIS object".
@@ -31,6 +37,24 @@ export class PolicyService {
         return app.assignedReviewerId === user.id;
       default:
         return false;
+    }
+  }
+
+  /**
+   * The same visibility rule as `canViewApplication`, expressed as a query
+   * filter, so list endpoints cannot drift from single-object access.
+   */
+  applicationScope(user: AuthUser): ApplicationScope {
+    switch (user.role) {
+      case Role.ADMIN:
+        return {};
+      case Role.SALES:
+        return { createdById: user.id };
+      case Role.REVIEWER:
+        return { assignedReviewerId: user.id };
+      default:
+        // Unknown role: fail closed.
+        throw new ForbiddenException();
     }
   }
 

@@ -14,3 +14,16 @@ export class InvalidStateTransitionError extends DomainError {
     });
   }
 }
+
+/** The application's data may only change while DRAFT or INFO_REQUESTED. */
+export class ApplicationNotEditableError extends DomainError {
+  readonly status = HttpStatus.CONFLICT;
+  readonly code = 'APPLICATION_NOT_EDITABLE';
+
+  constructor(currentStatus?: ApplicationStatus) {
+    super(
+      'Application can only be edited while in DRAFT or INFO_REQUESTED status',
+      currentStatus ? { currentStatus } : undefined,
+    );
+  }
+}
