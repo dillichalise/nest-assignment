@@ -1,0 +1,198 @@
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { AuthUser } from '../auth/auth-user.interface';
+import { AuditAction } from '../audit/audit-action.enum';
+import { AuditRecorder } from '../audit/audit-recorder';
+import { Role } from '../common/enums/role.enum';
+import {
+  ConflictError,
+  NotFoundError,
+  UnprocessableError,
+} from '../common/errors/domain.error';
+import { PolicyService } from '../policies/policy.service';
+import { UsersService } from '../users/users.service';
+import { findIncompleteFields } from './application-completeness';
+import { assertTransition } from './application-state-machine';
+import { applyTransition } from './application-transition';
+import { RiskReviewNotCompleteError } from './application.errors';
+import { ReviewDecision } from './dto/record-decision.dto';
+import { ApplicationStatus } from './enums/application-status.enum';
+import { RiskStatus } from './enums/risk-status.enum';
+import { MerchantApplication } from './merchant-application.entity';
+
+const ENTITY_TYPE = 'MerchantApplication';
+
+/**
+ * Lifecycle actions after creation: submit, assign, decide. CRUD lives in
+ * ApplicationsService. Every status change goes through `applyTransition`
+ * (state-machine check + compare-and-set), so invalid or racing requests end
+ * in a 409 and never corrupt state.
+ */
+@Injectable()
+export class ApplicationWorkflowService {
+  constructor(
+    @InjectRepository(MerchantApplication)
+    private readonly repo: Repository<MerchantApplication>,
+    private readonly policy: PolicyService,
+    private readonly users: UsersService,
+    private readonly audit: AuditRecorder,
+  ) {}
+
+  /** SALES (owner) or ADMIN: DRAFT | INFO_REQUESTED -> SUBMITTED. */
+  async submit(user: AuthUser, id: string): Promise<MerchantApplication> {
+    const application = await this.loadOrNotFound(id);
+
+    // Same rule as editing: owner or ADMIN. Others get the usual 404.
+    this.policy.assertCanEdit(user, application);
+    assertTransition(application.status, ApplicationStatus.SUBMITTED);
+
+    const missingFields = findIncompleteFields(application);
+    if (missingFields.length > 0) {
+      throw new UnprocessableError('Application is incomplete', {
+        missingFields,
+      });
+    }
+
+    await applyTransition(
+      this.repo,
+      id,
+      application.status,
+      ApplicationStatus.SUBMITTED,
+      {
+        submittedAt: new Date(),
+        // Every submission is reviewed from scratch, so a resubmission must not
+        // inherit the previous round's risk result.
+        riskStatus: RiskStatus.NOT_STARTED,
+        riskScore: null,
+        riskResult: null,
+      },
+    );
+
+    // >>> PACK 07 CALL SITE: enqueue the risk-review job for this submission
+    // here (and move riskStatus to PENDING in the same unit of work).
+
+    await this.audit.record({
+      action: AuditAction.APPLICATION_SUBMITTED,
+      actor: user,
+      entityType: ENTITY_TYPE,
+      entityId: id,
+      metadata: { from: application.status, to: ApplicationStatus.SUBMITTED },
+    });
+    return this.repo.findOneByOrFail({ id });
+  }
+
+  /**
+   * ADMIN only. SUBMITTED -> IN_REVIEW with the chosen reviewer.
+   *
+   * Re-assignment rule: while IN_REVIEW the reviewer MAY be changed (a reviewer
+   * can be unavailable); the status stays IN_REVIEW. In every other status it
+   * is a 409. Assigning the reviewer who already holds it is a no-op.
+   */
+  async assign(
+    user: AuthUser,
+    id: string,
+    reviewerId: string,
+  ): Promise<MerchantApplication> {
+    this.policy.assertCanAssignReviewer(user);
+
+    const application = await this.loadOrNotFound(id);
+    await this.assertAssignableReviewer(reviewerId);
+
+    if (application.status === ApplicationStatus.IN_REVIEW) {
+      if (application.assignedReviewerId === reviewerId) {
+        return application;
+      }
+      const result = await this.repo.update(
+        { id, status: ApplicationStatus.IN_REVIEW },
+        { assignedReviewerId: reviewerId },
+      );
+      if (!result.affected) {
+        throw new ConflictError(
+          'Application status changed concurrently; reload and retry',
+        );
+      }
+    } else {
+      // Throws a 409 unless the application is SUBMITTED.
+      await applyTransition(
+        this.repo,
+        id,
+        application.status,
+        ApplicationStatus.IN_REVIEW,
+        { assignedReviewerId: reviewerId },
+      );
+    }
+
+    await this.audit.record({
+      action: AuditAction.REVIEWER_ASSIGNED,
+      actor: user,
+      entityType: ENTITY_TYPE,
+      entityId: id,
+      metadata: {
+        reviewerId,
+        previousReviewerId: application.assignedReviewerId,
+        reassigned: application.status === ApplicationStatus.IN_REVIEW,
+      },
+    });
+    return this.repo.findOneByOrFail({ id });
+  }
+
+  /**
+   * Only the ASSIGNED reviewer may decide (no ADMIN override: an admin who
+   * could also approve would defeat the separation between operating the
+   * queue and making risk calls).
+   *
+   * Rule: a decision requires riskStatus = COMPLETED, so a reviewer never
+   * decides on a pending or failed risk check.
+   */
+  async decide(
+    user: AuthUser,
+    id: string,
+    decision: ReviewDecision,
+    reason?: string,
+  ): Promise<MerchantApplication> {
+    const application = await this.loadOrNotFound(id);
+
+    // 404 if the reviewer cannot see it (not assigned), 403 if visible but not allowed.
+    this.policy.assertCanDecide(user, application);
+
+    const target = ApplicationStatus[decision];
+    assertTransition(application.status, target);
+
+    if (application.riskStatus !== RiskStatus.COMPLETED) {
+      throw new RiskReviewNotCompleteError(application.riskStatus);
+    }
+
+    await applyTransition(this.repo, id, application.status, target, {
+      decisionReason: reason ?? null,
+      decidedAt: new Date(),
+    });
+
+    await this.audit.record({
+      action: AuditAction.DECISION_RECORDED,
+      actor: user,
+      entityType: ENTITY_TYPE,
+      entityId: id,
+      metadata: { decision, reason: reason ?? null },
+    });
+    return this.repo.findOneByOrFail({ id });
+  }
+
+  private async assertAssignableReviewer(reviewerId: string): Promise<void> {
+    const reviewer = await this.users.findById(reviewerId);
+    // One message for missing / inactive / wrong role.
+    if (!reviewer || !reviewer.isActive || reviewer.role !== Role.REVIEWER) {
+      throw new UnprocessableError(
+        'reviewerId must refer to an active user with the REVIEWER role',
+      );
+    }
+  }
+
+  private async loadOrNotFound(id: string): Promise<MerchantApplication> {
+    const application = await this.repo.findOneBy({ id });
+    if (!application) {
+      throw new NotFoundError('Application not found');
+    }
+    return application;
+  }
+}

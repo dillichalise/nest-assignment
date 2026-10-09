@@ -70,6 +70,17 @@ export class PolicyService {
     return user.role === Role.REVIEWER && app.assignedReviewerId === user.id;
   }
 
+  /** Assigning reviewers is an ADMIN-only operational action. */
+  canAssignReviewer(user: AuthUser): boolean {
+    return user.role === Role.ADMIN;
+  }
+
+  assertCanAssignReviewer(user: AuthUser): void {
+    if (!this.canAssignReviewer(user)) {
+      throw new ForbiddenException('Only an admin may assign reviewers');
+    }
+  }
+
   assertCanView(user: AuthUser, app: ApplicationAccessSubject): void {
     if (!this.canViewApplication(user, app)) {
       throw new NotFoundError('Application not found');
