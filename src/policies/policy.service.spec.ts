@@ -97,6 +97,19 @@ describe('PolicyService', () => {
     });
   });
 
+  describe('assign reviewer', () => {
+    it('is ADMIN-only', () => {
+      expect(policy.canAssignReviewer(admin)).toBe(true);
+      for (const who of [salesA, reviewer1]) {
+        expect(policy.canAssignReviewer(who)).toBe(false);
+        expect(() => policy.assertCanAssignReviewer(who)).toThrow(
+          ForbiddenException,
+        );
+      }
+      expect(() => policy.assertCanAssignReviewer(admin)).not.toThrow();
+    });
+  });
+
   describe('assert* denial convention', () => {
     it('view/edit denial is a 404 so existence is not leaked', () => {
       expect(() => policy.assertCanView(salesB, app)).toThrow(NotFoundError);
