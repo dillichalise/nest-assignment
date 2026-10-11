@@ -21,6 +21,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
 import { ApiErrorResponses } from '../common/errors/api-error-responses.decorator';
+import { PolicyService } from '../policies/policy.service';
 import { ApplicationWorkflowService } from './application-workflow.service';
 import { ApplicationsService } from './applications.service';
 import {
@@ -40,6 +41,7 @@ export class ApplicationsController {
   constructor(
     private readonly applications: ApplicationsService,
     private readonly workflow: ApplicationWorkflowService,
+    private readonly policy: PolicyService,
   ) {}
 
   @Post()
@@ -76,7 +78,7 @@ export class ApplicationsController {
   @ApiOperation({
     summary: 'Get one application',
     description:
-      'Returns 404 both when the application does not exist and when the caller may not see it.',
+      'Returns 404 both when the application does not exist and when the caller may not see it. Owner email, phone and tax id are masked, except for an ADMIN, who sees the full values here (and only here).',
   })
   @ApiOkResponse({ type: ApplicationResponseDto })
   @ApiErrorResponses(400, 401, 404)
@@ -84,8 +86,10 @@ export class ApplicationsController {
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<ApplicationResponseDto> {
+    const application = await this.applications.findOne(user, id);
     return ApplicationResponseDto.from(
-      await this.applications.findOne(user, id),
+      application,
+      this.policy.canViewSensitiveOwnerData(user),
     );
   }
 

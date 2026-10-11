@@ -8,6 +8,10 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import {
+  createEncryptedColumnTransformer,
+  ENCRYPTION_CONTEXT,
+} from '../common/security/field-encryption';
 import { decimalTransformer } from '../common/transformers/decimal.transformer';
 import { User } from '../users/user.entity';
 import { ApplicationStatus } from './enums/application-status.enum';
@@ -42,7 +46,17 @@ export class MerchantApplication {
   @Column({ type: 'varchar', length: 50 })
   ownerPhone!: string;
 
-  @Column({ type: 'text' })
+  /**
+   * SENSITIVE. Encrypted at rest (AES-256-GCM, see field-encryption.ts), so it
+   * cannot be searched, sorted or indexed. `text` because ciphertext + IV +
+   * auth tag is longer than the plaintext.
+   */
+  @Column({
+    type: 'text',
+    transformer: createEncryptedColumnTransformer(
+      ENCRYPTION_CONTEXT.MERCHANT_OWNER_TAX_ID,
+    ),
+  })
   ownerTaxId!: string;
 
   // Requested processing

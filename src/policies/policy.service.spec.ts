@@ -97,6 +97,15 @@ describe('PolicyService', () => {
     });
   });
 
+  describe('sensitive owner data', () => {
+    it('is visible to ADMIN only', () => {
+      expect(policy.canViewSensitiveOwnerData(admin)).toBe(true);
+      for (const who of [salesA, salesB, reviewer1, reviewer2]) {
+        expect(policy.canViewSensitiveOwnerData(who)).toBe(false);
+      }
+    });
+  });
+
   describe('assign reviewer', () => {
     it('is ADMIN-only', () => {
       expect(policy.canAssignReviewer(admin)).toBe(true);

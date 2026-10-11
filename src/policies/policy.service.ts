@@ -70,6 +70,15 @@ export class PolicyService {
     return user.role === Role.REVIEWER && app.assignedReviewerId === user.id;
   }
 
+  /**
+   * Full (unmasked) owner email, phone and tax id. Deliberately narrow: ADMIN
+   * only, and only on the single-application detail endpoint. Reviewers and
+   * sales users work with masked values.
+   */
+  canViewSensitiveOwnerData(user: AuthUser): boolean {
+    return user.role === Role.ADMIN;
+  }
+
   /** Assigning reviewers is an ADMIN-only operational action. */
   canAssignReviewer(user: AuthUser): boolean {
     return user.role === Role.ADMIN;

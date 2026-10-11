@@ -1,0 +1,127 @@
+# Security: sensitive data handling
+
+What is sensitive, how it is protected, and what a production system would add.
+Everything here describes the code as it exists today.
+
+## 1. What is sensitive
+
+| Data | Where | Protection |
+|---|---|---|
+| Passwords | `users.passwordHash` | bcrypt hash only; column is `select: false`, never returned by any endpoint, never logged |
+| JWTs / `Authorization` header | requests | never logged; redacted if a body or object is ever logged |
+| Owner tax id | `merchant_applications.ownerTaxId` | **encrypted at rest** (field level), masked in responses, redacted in logs |
+| Owner email, owner phone | `merchant_applications` | masked in responses, redacted in body logs |
+| Owner name, business names | `merchant_applications` | personal data, but needed in every view: not masked |
+| `FIELD_ENCRYPTION_KEY`, `JWT_SECRET` | environment | never logged; startup errors never echo them |
+
+## 2. Field-level encryption (`ownerTaxId`)
+
+Implementation: `src/common/security/field-encryption.ts`, applied by a TypeORM
+column transformer on the entity.
+
+- **Algorithm:** AES-256-GCM, random 12-byte IV per write, 16-byte auth tag.
+- **Stored format:** `v1:<iv>:<authTag>:<ciphertext>` (base64 parts). `v1` is a
+  format/key version reserved for rotation.
+- **Tamper detection:** GCM authenticates the data. Any change to the IV, tag or
+  ciphertext makes decryption fail. Failures raise one generic error (no
+  plaintext, key or payload in the message); the API answers `500 Internal server error`.
+- **Context binding:** the column name (`merchant_applications.ownerTaxId`) is
+  authenticated as additional data, so a ciphertext copied into another column
+  does not decrypt.
+- **Strict reads:** a plaintext value found in the column is rejected, not
+  served. This signals an un-run backfill migration.
+- **Key:** `FIELD_ENCRYPTION_KEY`, 32 random bytes, base64 (or 64 hex chars).
+  Generate one with `openssl rand -base64 32`.
+  - The app **refuses to start** if it is missing or the wrong length (skipped
+    only when `NODE_ENV=test`).
+  - `.env.example` publishes a development key. It is public, so the app also
+    refuses to start with it when `NODE_ENV=production`.
+- **Existing data:** migration `EncryptOwnerTaxId` encrypts any plaintext rows
+  (idempotent; `down` decrypts). It needs the same key as the running app.
+
+### Consequences of encrypting a column
+
+- It cannot be **searched, sorted, filtered or indexed**: equal inputs encrypt
+  to different values on purpose. Nothing in the app needs this today.
+- **If lookup by tax id is ever required**, add a *blind index*: a second column
+  holding `HMAC-SHA256(blindIndexKey, normalize(taxId))`, with its own key
+  separate from the encryption key, indexed and queried by recomputing the HMAC.
+  It reveals only equality, and low-entropy identifiers remain guessable by
+  anyone holding the HMAC key, so protect that key like the encryption key.
+- **Losing the key loses the data.** Back the key up separately from the database.
+- **A single undecryptable row fails any request that loads it.** For a list
+  that includes the row (ADMIN sees every application) the whole page returns
+  500. This fails closed: tampering is loud, never silently served. The
+  trade-off is availability; production should alert on these errors and
+  repair or quarantine the row rather than catch and hide the error.
+
+## 3. Masking in API responses
+
+`ApplicationResponseDto.from(application, revealSensitive)` is the only place
+entities become API output, with an explicit field list.
+
+| Field | Default (everyone) | Format |
+|---|---|---|
+| `ownerEmail` | masked | `c*********@example.com` (first character + domain) |
+| `ownerPhone` | masked | `+*** ******3210` (last 4 digits, formatting kept) |
+| `ownerTaxId` | masked | `*******-789` (last 4 characters) |
+
+**Who sees full values:** an **ADMIN**, on **`GET /applications/:id` only**
+(`PolicyService.canViewSensitiveOwnerData`). Lists and every write/workflow
+response (create, update, submit, assign, decision) stay masked, even for ADMIN.
+Reviewers and sales users always see masked values.
+
+Why this narrow: full contact and identity data is needed rarely, so access is
+an explicit, single-purpose request instead of a side effect of listing.
+
+Not exposed at all: `passwordHash`, `riskResult` (until the risk-review pack
+decides who may see provider detail).
+
+## 4. Logging
+
+`src/common/middleware/http-logging.middleware.ts` writes one line per request:
+
+```
+POST /auth/login 401 65ms requestId=<uuid> userId=-
+```
+
+- **Never logged:** query strings, request/response headers, response bodies,
+  passwords, tokens, `Authorization`, tax ids.
+- **Request bodies** are off by default. With `LOG_HTTP_BODIES=true` they are
+  logged **after `redact()`**, which replaces the value of any key containing
+  `password`, `secret`, `token`, `authorization`, `apikey`, `cookie`,
+  `credential`, `taxid`, `privatekey` or `encryptionkey`, plus contact keys
+  (`email`, `phone`). Matching is by substring on a normalized key name, so it
+  errs toward over-redaction. Use only for debugging, never in production.
+- Server errors (`5xx`) are logged by the exception filter with a stack trace and
+  the request id; the client only ever receives a generic message.
+- `LOG_HTTP=false` disables the access log (it is off under Jest by default).
+- `redact()` is the shared helper for any other place that must serialize
+  objects, for example audit metadata.
+
+## 5. Authentication notes
+
+- JWTs are signed with `JWT_SECRET` and expire after `JWT_EXPIRES_IN` seconds.
+- Login failures (unknown email, wrong password, inactive user) return the same
+  generic `401`, and a dummy bcrypt comparison runs for unknown emails so response
+  time does not reveal which accounts exist.
+- Role and user id are taken from the verified token only, never from the
+  request body or headers.
+
+## 6. What production would add
+
+- **Key management:** keep `FIELD_ENCRYPTION_KEY` in a KMS or secrets manager,
+  not a `.env` file; use **envelope encryption** (a KMS-wrapped data key per
+  tenant or per table) so the master key never leaves the KMS.
+- **Key rotation:** the `v1` prefix exists for this. Add a key id to the format,
+  keep old keys for reading, write with the newest, and re-encrypt in the
+  background. Not implemented.
+- **Audit of access:** record every ADMIN reveal of sensitive owner data in the
+  audit trail.
+- **Transport and storage:** TLS everywhere, encrypted database volumes and
+  backups, restricted database roles.
+- **Hardening:** rate limiting on login, refresh/revocable tokens, secret
+  scanning in CI, alerting on decryption failures and repeated 401s.
+- **Tamper-evident audit log** (hash chaining or write-once storage).
+- **Data lifecycle:** retention limits and deletion of tax ids for rejected
+  applications.
