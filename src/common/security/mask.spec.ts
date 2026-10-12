@@ -1,4 +1,11 @@
-import { maskEmail, maskPhone, maskTaxId, redact, REDACTED } from './mask';
+import {
+  maskEmail,
+  maskPersonalDataInText,
+  maskPhone,
+  maskTaxId,
+  redact,
+  REDACTED,
+} from './mask';
 
 describe('maskTaxId', () => {
   it('keeps only the last 4 characters', () => {
@@ -153,5 +160,31 @@ describe('redact', () => {
       }),
     );
     expect(out).not.toContain('S3CR3T-VALUE');
+  });
+});
+
+describe('maskPersonalDataInText', () => {
+  it('masks every email address in the text', () => {
+    expect(
+      maskPersonalDataInText('cc a.b@example.com and cd@example.org please'),
+    ).toBe('cc a**@example.com and c**@example.org please');
+  });
+
+  it('masks phone-number-looking runs of 9 or more digits', () => {
+    const out = maskPersonalDataInText('call +977 9876543210 today');
+    expect(out).not.toContain('9876543210');
+    expect(out).toContain('3210');
+    expect(out).toContain('today');
+  });
+
+  it.each([
+    'order 4521 shipped',
+    'score 79 of 100',
+    'on 2026-10-12 10:30 sharp',
+    'ref ABC123456789XYZ',
+    'no personal data here',
+    '',
+  ])('leaves %p alone', (text) => {
+    expect(maskPersonalDataInText(text)).toBe(text);
   });
 });

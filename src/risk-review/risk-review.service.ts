@@ -1,18 +1,16 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
-import { In, Repository } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { ApplicationStatus } from '../applications/enums/application-status.enum';
 import { RiskStatus } from '../applications/enums/risk-status.enum';
 import { MerchantApplication } from '../applications/merchant-application.entity';
 import { AuditAction } from '../audit/audit-action.enum';
+import { AuditEntityType } from '../audit/audit-entity-type';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { RISK_REVIEW_JOB, RISK_REVIEW_QUEUE } from '../queue/queue.constants';
 import { RiskAssessment } from './risk-provider';
 import { RiskReviewJobData, riskReviewJobId } from './risk-review.types';
-
-const ENTITY_TYPE = 'MerchantApplication';
 
 /** Statuses in which a risk review is still meaningful. */
 export const RISK_REVIEWABLE_STATUSES = [
@@ -32,8 +30,7 @@ export class RiskReviewService {
   constructor(
     @InjectQueue(RISK_REVIEW_QUEUE)
     private readonly queue: Queue<RiskReviewJobData>,
-    @InjectRepository(MerchantApplication)
-    private readonly repo: Repository<MerchantApplication>,
+    private readonly dataSource: DataSource,
     private readonly audit: AuditRecorder,
   ) {}
 
@@ -76,70 +73,91 @@ export class RiskReviewService {
     }
   }
 
-  /** Stores the provider's answer. False when the run was superseded or already applied. */
+  /**
+   * Stores the provider's answer, with its audit record in the same
+   * transaction. False when the run was superseded or already applied (then
+   * nothing is written and nothing is audited).
+   *
+   * `correlationId` is the BullMQ job id when called from the worker.
+   */
   async markCompleted(
     applicationId: string,
     run: number,
     assessment: RiskAssessment,
+    correlationId?: string,
   ): Promise<boolean> {
-    const result = await this.repo.update(
-      {
-        id: applicationId,
-        riskReviewRun: run,
-        riskStatus: RiskStatus.PENDING,
-        status: In([...RISK_REVIEWABLE_STATUSES]),
-      },
-      {
-        riskStatus: RiskStatus.COMPLETED,
-        riskScore: assessment.score,
-        riskResult: { ...assessment },
-      },
-    );
-    if (!result.affected) {
-      return false;
-    }
-    await this.audit.record({
-      action: AuditAction.RISK_REVIEW_COMPLETED,
-      actor: null,
-      entityType: ENTITY_TYPE,
-      entityId: applicationId,
-      metadata: { run, score: assessment.score, level: assessment.level },
+    return this.dataSource.transaction(async (manager) => {
+      const result = await manager.getRepository(MerchantApplication).update(
+        {
+          id: applicationId,
+          riskReviewRun: run,
+          riskStatus: RiskStatus.PENDING,
+          status: In([...RISK_REVIEWABLE_STATUSES]),
+        },
+        {
+          riskStatus: RiskStatus.COMPLETED,
+          riskScore: assessment.score,
+          riskResult: { ...assessment },
+        },
+      );
+      if (!result.affected) {
+        return false;
+      }
+      await this.audit.record(
+        {
+          action: AuditAction.RISK_REVIEW_COMPLETED,
+          actor: null,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: applicationId,
+          metadata: { run, score: assessment.score, level: assessment.level },
+          correlationId,
+        },
+        manager,
+      );
+      return true;
     });
-    return true;
   }
 
   /**
-   * Records a final failure. Only a code and attempt count are stored, never
-   * the provider's raw error text.
+   * Records a final failure, with its audit record in the same transaction.
+   * Only a code and attempt count are stored, never the provider's raw error
+   * text.
    */
   async markFailed(
     applicationId: string,
     run: number,
     code: string,
     attempts: number,
+    correlationId?: string,
   ): Promise<boolean> {
-    const result = await this.repo.update(
-      {
-        id: applicationId,
-        riskReviewRun: run,
-        riskStatus: RiskStatus.PENDING,
-      },
-      {
-        riskStatus: RiskStatus.FAILED,
-        riskScore: null,
-        riskResult: { failure: { code, attempts } },
-      },
-    );
-    if (!result.affected) {
-      return false;
-    }
-    await this.audit.record({
-      action: AuditAction.RISK_REVIEW_FAILED,
-      actor: null,
-      entityType: ENTITY_TYPE,
-      entityId: applicationId,
-      metadata: { run, code, attempts },
+    return this.dataSource.transaction(async (manager) => {
+      const result = await manager.getRepository(MerchantApplication).update(
+        {
+          id: applicationId,
+          riskReviewRun: run,
+          riskStatus: RiskStatus.PENDING,
+        },
+        {
+          riskStatus: RiskStatus.FAILED,
+          riskScore: null,
+          riskResult: { failure: { code, attempts } },
+        },
+      );
+      if (!result.affected) {
+        return false;
+      }
+      await this.audit.record(
+        {
+          action: AuditAction.RISK_REVIEW_FAILED,
+          actor: null,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: applicationId,
+          metadata: { run, code, attempts },
+          correlationId,
+        },
+        manager,
+      );
+      return true;
     });
-    return true;
   }
 }

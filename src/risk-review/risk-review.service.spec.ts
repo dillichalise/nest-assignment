@@ -1,8 +1,7 @@
 import { Queue } from 'bullmq';
-import { Repository } from 'typeorm';
 import { ApplicationStatus } from '../applications/enums/application-status.enum';
+import { fakeDataSource } from '../common/testing/fake-data-source';
 import { RiskStatus } from '../applications/enums/risk-status.enum';
-import { MerchantApplication } from '../applications/merchant-application.entity';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { RiskReviewService } from './risk-review.service';
@@ -11,6 +10,7 @@ import { riskReviewJobId } from './risk-review.types';
 describe('RiskReviewService', () => {
   let queue: { add: jest.Mock };
   let repo: { update: jest.Mock };
+  let tx: ReturnType<typeof fakeDataSource>;
   let audit: { record: jest.Mock };
   let service: RiskReviewService;
 
@@ -18,10 +18,11 @@ describe('RiskReviewService', () => {
     jest.spyOn(console, 'error').mockImplementation();
     queue = { add: jest.fn().mockResolvedValue({}) };
     repo = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
+    tx = fakeDataSource(repo);
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     service = new RiskReviewService(
       queue as unknown as Queue,
-      repo as unknown as Repository<MerchantApplication>,
+      tx.dataSource,
       audit as unknown as AuditRecorder,
     );
   });
@@ -72,6 +73,7 @@ describe('RiskReviewService', () => {
       });
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({ action: AuditAction.RISK_REVIEW_FAILED }),
+        tx.manager,
       );
     });
   });
@@ -108,13 +110,16 @@ describe('RiskReviewService', () => {
     it('audits completion once, with the score and level but no raw detail', async () => {
       await service.markCompleted('app-1', 3, assessment);
       expect(audit.record).toHaveBeenCalledTimes(1);
-      expect(audit.record).toHaveBeenCalledWith({
-        action: AuditAction.RISK_REVIEW_COMPLETED,
-        actor: null,
-        entityType: 'MerchantApplication',
-        entityId: 'app-1',
-        metadata: { run: 3, score: 42, level: 'MEDIUM' },
-      });
+      expect(audit.record).toHaveBeenCalledWith(
+        {
+          action: AuditAction.RISK_REVIEW_COMPLETED,
+          actor: null,
+          entityType: 'MerchantApplication',
+          entityId: 'app-1',
+          metadata: { run: 3, score: 42, level: 'MEDIUM' },
+        },
+        tx.manager,
+      );
     });
 
     it('changes nothing and audits nothing when the run was superseded or already applied', async () => {
@@ -142,12 +147,73 @@ describe('RiskReviewService', () => {
           actor: null,
           metadata: { run: 2, code: 'PROVIDER_UNAVAILABLE', attempts: 3 },
         }),
+        tx.manager,
       );
     });
 
     it('does nothing for a superseded or already-finished run', async () => {
       repo.update.mockResolvedValue({ affected: 0 });
       await expect(service.markFailed('app-1', 1, 'X', 1)).resolves.toBe(false);
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('transactions and correlation', () => {
+    const assessment = {
+      score: 42,
+      level: 'MEDIUM' as const,
+      flags: [],
+      provider: 'simulated-kyb',
+      reference: 'SIM-abc',
+    };
+
+    it('markCompleted: the result and its audit record share one transaction', async () => {
+      await service.markCompleted('app-1', 1, assessment);
+
+      expect(tx.transaction).toHaveBeenCalledTimes(1);
+      expect(audit.record.mock.calls[0][1]).toBe(tx.manager);
+      expect(repo.update.mock.invocationCallOrder[0]).toBeLessThan(
+        audit.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('markCompleted: a failing audit write aborts the result write (fail closed)', async () => {
+      audit.record.mockRejectedValue(new Error('audit table unavailable'));
+      await expect(
+        service.markCompleted('app-1', 1, assessment),
+      ).rejects.toThrow('audit table unavailable');
+    });
+
+    it('markFailed: the failure and its audit record share one transaction', async () => {
+      await service.markFailed('app-1', 1, 'PROVIDER_UNAVAILABLE', 3);
+      expect(tx.transaction).toHaveBeenCalledTimes(1);
+      expect(audit.record.mock.calls[0][1]).toBe(tx.manager);
+    });
+
+    it('marks the audit event with the job id when one is given (worker), and none otherwise (HTTP)', async () => {
+      await service.markCompleted(
+        'app-1',
+        1,
+        assessment,
+        'risk-review-app-1-1',
+      );
+      await service.markFailed('app-2', 1, 'X', 1, 'risk-review-app-2-1');
+      await service.markFailed('app-3', 1, 'X', 1);
+
+      expect(audit.record.mock.calls[0][0].correlationId).toBe(
+        'risk-review-app-1-1',
+      );
+      expect(audit.record.mock.calls[1][0].correlationId).toBe(
+        'risk-review-app-2-1',
+      );
+      // undefined: AuditService then falls back to the current request id
+      expect(audit.record.mock.calls[2][0].correlationId).toBeUndefined();
+    });
+
+    it('a superseded run opens a transaction but writes and audits nothing', async () => {
+      repo.update.mockResolvedValue({ affected: 0 });
+      await service.markCompleted('app-1', 1, assessment);
+      await service.markFailed('app-1', 1, 'X', 1);
       expect(audit.record).not.toHaveBeenCalled();
     });
   });

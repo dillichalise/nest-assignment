@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { AuthUser } from '../auth/auth-user.interface';
 import { AuditAction } from '../audit/audit-action.enum';
+import { AuditEntityType } from '../audit/audit-entity-type';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { Role } from '../common/enums/role.enum';
 import {
@@ -29,13 +30,17 @@ import { ApplicationStatus } from './enums/application-status.enum';
 import { RiskStatus } from './enums/risk-status.enum';
 import { MerchantApplication } from './merchant-application.entity';
 
-const ENTITY_TYPE = 'MerchantApplication';
-
 /**
  * Lifecycle actions after creation: submit, assign, decide. CRUD lives in
  * ApplicationsService. Every status change goes through `applyTransition`
  * (state-machine check + compare-and-set), so invalid or racing requests end
  * in a 409 and never corrupt state.
+ *
+ * Each action runs in ONE database transaction that contains both the change
+ * and its audit record: the trail can neither miss a change nor describe one
+ * that was rolled back. If writing the audit row fails, the change is rolled
+ * back too (fail closed). Work that lives outside Postgres, namely queueing the
+ * background risk review, happens after the commit.
  */
 @Injectable()
 export class ApplicationWorkflowService {
@@ -46,6 +51,7 @@ export class ApplicationWorkflowService {
     private readonly users: UsersService,
     private readonly audit: AuditRecorder,
     private readonly riskReviews: RiskReviewService,
+    private readonly dataSource: DataSource,
   ) {}
 
   /** SALES (owner) or ADMIN: DRAFT | INFO_REQUESTED -> SUBMITTED. */
@@ -63,37 +69,49 @@ export class ApplicationWorkflowService {
       });
     }
 
-    await applyTransition(
-      this.repo,
-      id,
-      application.status,
-      ApplicationStatus.SUBMITTED,
-      {
-        submittedAt: new Date(),
-        // Every submission is reviewed from scratch: clear the previous
-        // round's result, mark the review PENDING and bump the run counter.
-        // All of it is part of the SAME single UPDATE as the status change, so
-        // the application is never SUBMITTED without a pending review.
-        riskStatus: RiskStatus.PENDING,
-        riskScore: null,
-        riskResult: null,
-        riskReviewRun: () => '"riskReviewRun" + 1',
-      },
-    );
+    const run = await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(MerchantApplication);
 
-    await this.audit.record({
-      action: AuditAction.APPLICATION_SUBMITTED,
-      actor: user,
-      entityType: ENTITY_TYPE,
-      entityId: id,
-      metadata: { from: application.status, to: ApplicationStatus.SUBMITTED },
+      await applyTransition(
+        repo,
+        id,
+        application.status,
+        ApplicationStatus.SUBMITTED,
+        {
+          submittedAt: new Date(),
+          // Every submission is reviewed from scratch: clear the previous
+          // round's result, mark the review PENDING and bump the run counter.
+          // All of it is part of the SAME single UPDATE as the status change,
+          // so the application is never SUBMITTED without a pending review.
+          riskStatus: RiskStatus.PENDING,
+          riskScore: null,
+          riskResult: null,
+          riskReviewRun: () => '"riskReviewRun" + 1',
+        },
+      );
+      const { riskReviewRun } = await repo.findOneByOrFail({ id });
+
+      await this.audit.record(
+        {
+          action: AuditAction.APPLICATION_SUBMITTED,
+          actor: user,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: id,
+          metadata: {
+            from: application.status,
+            to: ApplicationStatus.SUBMITTED,
+            riskReviewRun,
+          },
+        },
+        manager,
+      );
+      return riskReviewRun;
     });
 
     // Queue the background review AFTER the commit. If queueing fails the
     // review is marked FAILED (retryable by an admin) and the submission itself
     // still stands; see RiskReviewService.enqueue for the trade-off.
-    const submitted = await this.repo.findOneByOrFail({ id });
-    await this.riskReviews.enqueue(id, submitted.riskReviewRun);
+    await this.riskReviews.enqueue(id, run);
 
     return this.repo.findOneByOrFail({ id });
   }
@@ -120,36 +138,44 @@ export class ApplicationWorkflowService {
       );
     }
 
-    // Compare-and-set: of two concurrent retries only one starts a new run.
-    const result = await this.repo.update(
-      {
-        id,
-        riskStatus: RiskStatus.FAILED,
-        status: In([...RISK_REVIEWABLE_STATUSES]),
-      },
-      {
-        riskStatus: RiskStatus.PENDING,
-        riskScore: null,
-        riskResult: null,
-        riskReviewRun: () => '"riskReviewRun" + 1',
-      },
-    );
-    if (!result.affected) {
-      throw new ConflictError(
-        'Risk review state changed concurrently; reload and retry',
-      );
-    }
+    const run = await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(MerchantApplication);
 
-    const restarted = await this.repo.findOneByOrFail({ id });
-    await this.audit.record({
-      action: AuditAction.RISK_REVIEW_RETRY_REQUESTED,
-      actor: user,
-      entityType: ENTITY_TYPE,
-      entityId: id,
-      metadata: { run: restarted.riskReviewRun },
+      // Compare-and-set: of two concurrent retries only one starts a new run.
+      const result = await repo.update(
+        {
+          id,
+          riskStatus: RiskStatus.FAILED,
+          status: In([...RISK_REVIEWABLE_STATUSES]),
+        },
+        {
+          riskStatus: RiskStatus.PENDING,
+          riskScore: null,
+          riskResult: null,
+          riskReviewRun: () => '"riskReviewRun" + 1',
+        },
+      );
+      if (!result.affected) {
+        throw new ConflictError(
+          'Risk review state changed concurrently; reload and retry',
+        );
+      }
+
+      const { riskReviewRun } = await repo.findOneByOrFail({ id });
+      await this.audit.record(
+        {
+          action: AuditAction.RISK_REVIEW_RETRY_REQUESTED,
+          actor: user,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: id,
+          metadata: { run: riskReviewRun },
+        },
+        manager,
+      );
+      return riskReviewRun;
     });
 
-    if (!(await this.riskReviews.enqueue(id, restarted.riskReviewRun))) {
+    if (!(await this.riskReviews.enqueue(id, run))) {
       // enqueue() already put the review back to FAILED.
       throw new RiskReviewUnavailableError();
     }
@@ -173,40 +199,49 @@ export class ApplicationWorkflowService {
     const application = await this.loadOrNotFound(id);
     await this.assertAssignableReviewer(reviewerId);
 
-    if (application.status === ApplicationStatus.IN_REVIEW) {
-      if (application.assignedReviewerId === reviewerId) {
-        return application;
-      }
-      const result = await this.repo.update(
-        { id, status: ApplicationStatus.IN_REVIEW },
-        { assignedReviewerId: reviewerId },
-      );
-      if (!result.affected) {
-        throw new ConflictError(
-          'Application status changed concurrently; reload and retry',
-        );
-      }
-    } else {
-      // Throws a 409 unless the application is SUBMITTED.
-      await applyTransition(
-        this.repo,
-        id,
-        application.status,
-        ApplicationStatus.IN_REVIEW,
-        { assignedReviewerId: reviewerId },
-      );
+    const reassigning = application.status === ApplicationStatus.IN_REVIEW;
+    if (reassigning && application.assignedReviewerId === reviewerId) {
+      return application; // already theirs: nothing changes, nothing to audit
     }
 
-    await this.audit.record({
-      action: AuditAction.REVIEWER_ASSIGNED,
-      actor: user,
-      entityType: ENTITY_TYPE,
-      entityId: id,
-      metadata: {
-        reviewerId,
-        previousReviewerId: application.assignedReviewerId,
-        reassigned: application.status === ApplicationStatus.IN_REVIEW,
-      },
+    await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(MerchantApplication);
+
+      if (reassigning) {
+        const result = await repo.update(
+          { id, status: ApplicationStatus.IN_REVIEW },
+          { assignedReviewerId: reviewerId },
+        );
+        if (!result.affected) {
+          throw new ConflictError(
+            'Application status changed concurrently; reload and retry',
+          );
+        }
+      } else {
+        // Throws a 409 unless the application is SUBMITTED.
+        await applyTransition(
+          repo,
+          id,
+          application.status,
+          ApplicationStatus.IN_REVIEW,
+          { assignedReviewerId: reviewerId },
+        );
+      }
+
+      await this.audit.record(
+        {
+          action: AuditAction.REVIEWER_ASSIGNED,
+          actor: user,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: id,
+          metadata: {
+            reviewerId,
+            previousReviewerId: application.assignedReviewerId,
+            reassigned: reassigning,
+          },
+        },
+        manager,
+      );
     });
     return this.repo.findOneByOrFail({ id });
   }
@@ -237,17 +272,26 @@ export class ApplicationWorkflowService {
       throw new RiskReviewNotCompleteError(application.riskStatus);
     }
 
-    await applyTransition(this.repo, id, application.status, target, {
-      decisionReason: reason ?? null,
-      decidedAt: new Date(),
-    });
+    await this.dataSource.transaction(async (manager) => {
+      await applyTransition(
+        manager.getRepository(MerchantApplication),
+        id,
+        application.status,
+        target,
+        { decisionReason: reason ?? null, decidedAt: new Date() },
+      );
 
-    await this.audit.record({
-      action: AuditAction.DECISION_RECORDED,
-      actor: user,
-      entityType: ENTITY_TYPE,
-      entityId: id,
-      metadata: { decision, reason: reason ?? null },
+      await this.audit.record(
+        {
+          action: AuditAction.DECISION_RECORDED,
+          actor: user,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: id,
+          // `reason` is free text; the sanitizer masks emails and phone numbers in it.
+          metadata: { decision, reason: reason ?? null },
+        },
+        manager,
+      );
     });
     return this.repo.findOneByOrFail({ id });
   }

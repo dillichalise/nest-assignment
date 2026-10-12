@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
+import { AuditAction } from '../audit/audit-action.enum';
+import { AuditEntityType } from '../audit/audit-entity-type';
+import { AuditRecorder } from '../audit/audit-recorder';
 import { AuthUser } from '../auth/auth-user.interface';
 import { NotFoundError } from '../common/errors/domain.error';
 import { PolicyService } from '../policies/policy.service';
@@ -19,31 +22,47 @@ export class ApplicationsService {
     @InjectRepository(MerchantApplication)
     private readonly repo: Repository<MerchantApplication>,
     private readonly policy: PolicyService,
+    private readonly dataSource: DataSource,
+    private readonly audit: AuditRecorder,
   ) {}
 
   async create(
     user: AuthUser,
     dto: CreateApplicationDto,
   ): Promise<MerchantApplication> {
-    const application = this.repo.create({
-      businessName: dto.businessName,
-      legalBusinessName: dto.legalBusinessName,
-      businessType: dto.businessType,
-      ownerName: dto.ownerName,
-      ownerEmail: dto.ownerEmail,
-      ownerPhone: dto.ownerPhone,
-      ownerTaxId: dto.ownerTaxId,
-      monthlyVolume: dto.monthlyVolume,
-      averageTicketSize: dto.averageTicketSize,
-      currency: dto.currency,
-      // Server-controlled; never taken from the request body.
-      createdById: user.id,
-      status: ApplicationStatus.DRAFT,
-      riskStatus: RiskStatus.NOT_STARTED,
+    // The row and its audit record commit (or roll back) together.
+    return this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(MerchantApplication);
+      const application = repo.create({
+        businessName: dto.businessName,
+        legalBusinessName: dto.legalBusinessName,
+        businessType: dto.businessType,
+        ownerName: dto.ownerName,
+        ownerEmail: dto.ownerEmail,
+        ownerPhone: dto.ownerPhone,
+        ownerTaxId: dto.ownerTaxId,
+        monthlyVolume: dto.monthlyVolume,
+        averageTicketSize: dto.averageTicketSize,
+        currency: dto.currency,
+        // Server-controlled; never taken from the request body.
+        createdById: user.id,
+        status: ApplicationStatus.DRAFT,
+        riskStatus: RiskStatus.NOT_STARTED,
+      });
+      const saved = await repo.save(application);
+      await this.audit.record(
+        {
+          action: AuditAction.APPLICATION_CREATED,
+          actor: user,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: saved.id,
+          metadata: { initialStatus: ApplicationStatus.DRAFT },
+        },
+        manager,
+      );
+      // Re-read so the response matches GET exactly (DB-normalized decimals, defaults).
+      return repo.findOneByOrFail({ id: saved.id });
     });
-    const saved = await this.repo.save(application);
-    // Re-read so the response matches GET exactly (DB-normalized decimals, defaults).
-    return this.repo.findOneByOrFail({ id: saved.id });
   }
 
   async findOne(user: AuthUser, id: string): Promise<MerchantApplication> {
@@ -97,15 +116,30 @@ export class ApplicationsService {
       return application;
     }
 
-    // Compare-and-set on status: if a submit raced us, nothing is updated.
-    const result = await this.repo.update(
-      { id, status: In([...EDITABLE_STATUSES]) },
-      patch,
-    );
-    if (!result.affected) {
-      throw new ApplicationNotEditableError();
-    }
-    return this.repo.findOneByOrFail({ id });
+    return this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(MerchantApplication);
+
+      // Compare-and-set on status: if a submit raced us, nothing is updated.
+      const result = await repo.update(
+        { id, status: In([...EDITABLE_STATUSES]) },
+        patch,
+      );
+      if (!result.affected) {
+        throw new ApplicationNotEditableError();
+      }
+      await this.audit.record(
+        {
+          action: AuditAction.APPLICATION_UPDATED,
+          actor: user,
+          entityType: AuditEntityType.APPLICATION,
+          entityId: id,
+          // Field NAMES only: values can be personal data (email, tax id).
+          metadata: { changedFields: Object.keys(patch).sort() },
+        },
+        manager,
+      );
+      return repo.findOneByOrFail({ id });
+    });
   }
 
   private async loadOrNotFound(id: string): Promise<MerchantApplication> {

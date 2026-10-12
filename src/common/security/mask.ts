@@ -68,7 +68,10 @@ const SENSITIVE_KEY_PARTS = [
 const normalizeKey = (key: string) =>
   key.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-const isSensitiveKey = (key: string, extraKeys: readonly string[]) => {
+export const isSensitiveKey = (
+  key: string,
+  extraKeys: readonly string[] = [],
+) => {
   const normalized = normalizeKey(key);
   return (
     SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part)) ||
@@ -110,3 +113,26 @@ export const redact = <T>(value: T, extraKeys: readonly string[] = []): T => {
 
   return walk(value) as T;
 };
+
+const EMAIL_IN_TEXT = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// A run of digits with common phone separators, not glued to a word.
+const PHONE_IN_TEXT = /(?<![\w.])\+?\d[\d\s().-]{6,}\d(?![\w])/g;
+const MIN_PHONE_DIGITS = 9;
+const ISO_DATE_START = /^\d{4}-\d{2}-\d{2}/;
+
+/**
+ * Best-effort masking of personal data inside free text (decision reasons and
+ * the like): every email address and every phone-number-looking run of 9+
+ * digits. It is a heuristic safety net, not a guarantee: structured fields
+ * must never rely on it. Dates and short numbers are left alone.
+ */
+export const maskPersonalDataInText = (text: string): string =>
+  text
+    .replace(EMAIL_IN_TEXT, (match) => maskEmail(match))
+    .replace(PHONE_IN_TEXT, (match) => {
+      const digits = match.replace(/\D/g, '').length;
+      if (digits < MIN_PHONE_DIGITS || ISO_DATE_START.test(match)) {
+        return match;
+      }
+      return maskPhone(match.trimEnd());
+    });

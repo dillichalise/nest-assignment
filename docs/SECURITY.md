@@ -120,7 +120,81 @@ POST /auth/login 401 65ms requestId=<uuid> userId=-
   uses a unique prefix per run so test jobs can never be picked up by a
   developer's or an environment's worker.
 
-## 6. Authentication notes
+## 6. Audit trail
+
+Implementation: `src/audit/`. One row in `audit_logs` per significant action.
+
+**What is recorded**
+
+| Action | Written by | Metadata |
+|---|---|---|
+| `APPLICATION_CREATED` | create | initial status |
+| `APPLICATION_UPDATED` | edit | the changed field **names**, never the values |
+| `APPLICATION_SUBMITTED` | submit | from/to status, risk-review run |
+| `REVIEWER_ASSIGNED` | assign | reviewer, previous reviewer, whether it was a re-assignment |
+| `DECISION_RECORDED` | decision | decision and reason (free text, sanitized) |
+| `RISK_REVIEW_STARTED` / `COMPLETED` / `FAILED` | worker | run, score and level, or failure code and attempts |
+| `RISK_REVIEW_RETRY_REQUESTED` | admin retry | run |
+| `LOGIN_SUCCEEDED` / `LOGIN_FAILED` | login | failure reason (`UNKNOWN_EMAIL`, `BAD_PASSWORD`, `INACTIVE_USER`) and the masked email |
+
+Each row has: actor id and role (null for system actions and unknown-email
+logins), action, entity type and id, sanitized metadata, a correlation id and a
+timestamp (`clock_timestamp()`, so rows in one transaction stay distinct and
+ordered).
+
+The **client** still receives one generic `401` for every login failure; only
+the audit trail knows the real reason.
+
+**One write path, in the same transaction.** `AuditService.record(event, manager)`
+is the only way a row is written. Every state change runs in one database
+transaction that contains both the change and its audit row, so the trail can
+neither miss a change nor describe one that was rolled back. The test suite
+proves both directions: a failing audit insert undoes the change (and no
+background job is queued for it), and a failure *after* the audit insert removes
+that row too.
+- **Fail closed:** if the audit row cannot be written, the action fails (`500`).
+  Availability is traded for completeness. A system that must stay up when the
+  audit store is down would need an outbox instead.
+- Work that is not in Postgres (queueing the risk-review job) happens after the
+  commit; see `RiskReviewService.enqueue` for that trade-off.
+
+**Sanitizing.** Everything passes through `sanitizeAuditMetadata` before it is
+stored: values under secret-looking keys (password, token, authorization,
+secret, api key, cookie, tax id) become `[REDACTED]`; values under `*email*` and
+`*phone*` keys are masked; emails and phone numbers inside any other string are
+masked; uuids are left intact; depth, array length, string length and total size
+are bounded. Two honest limits: free-text masking is a **heuristic** (it cannot
+recognise a tax id written in a sentence), so the real protection is that
+callers pass ids, enums and counts, and edits record field names rather than
+values; and a reviewer's decision `reason` is stored (sanitized) because the
+reason is the point of the record.
+
+**Correlation.** For API actions the correlation id is the request id (the
+`x-request-id` response header and the access-log line); for worker actions it is
+the BullMQ job id. It is carried through async code with `AsyncLocalStorage`.
+
+**Append-only.**
+- The application has no update or delete path (`AuditService` has none).
+- A database trigger additionally rejects `UPDATE` and `DELETE` on the table.
+  This stops application bugs and casual edits; it is **not a security boundary**
+  against someone with database access, who can disable the trigger or set the
+  maintenance flag (`SET LOCAL app.audit_maintenance = 'on'`) that test clean-up
+  and a deliberate, reviewed data fix use. In production also revoke
+  `UPDATE`/`DELETE` on `audit_logs` from the application's database role, and
+  consider shipping rows to write-once storage.
+- There are no foreign keys: the trail must outlive the users and applications it
+  describes.
+
+**Reading.** `GET /applications/:id/audit` is **ADMIN-only**, oldest first,
+paginated. Not the owner and not the assigned reviewer: the trail shows other
+people's actions and system events. There is no search, export or UI.
+
+**Not covered yet.** Reads of sensitive data (an ADMIN revealing a tax id) are
+not recorded; there is no tamper-evident chaining (hash of the previous row); a
+burst of failed logins writes a row each, so login needs rate limiting; there is
+no retention or archival policy.
+
+## 7. Authentication notes
 
 - JWTs are signed with `JWT_SECRET` and expire after `JWT_EXPIRES_IN` seconds.
 - Login failures (unknown email, wrong password, inactive user) return the same
@@ -129,7 +203,7 @@ POST /auth/login 401 65ms requestId=<uuid> userId=-
 - Role and user id are taken from the verified token only, never from the
   request body or headers.
 
-## 7. What production would add
+## 8. What production would add
 
 - **Key management:** keep `FIELD_ENCRYPTION_KEY` in a KMS or secrets manager,
   not a `.env` file; use **envelope encryption** (a KMS-wrapped data key per
@@ -138,7 +212,7 @@ POST /auth/login 401 65ms requestId=<uuid> userId=-
   keep old keys for reading, write with the newest, and re-encrypt in the
   background. Not implemented.
 - **Audit of access:** record every ADMIN reveal of sensitive owner data in the
-  audit trail.
+  audit trail (not done today).
 - **Transport and storage:** TLS everywhere, encrypted database volumes and
   backups, restricted database roles.
 - **Hardening:** rate limiting on login, refresh/revocable tokens, secret

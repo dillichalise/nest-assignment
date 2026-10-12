@@ -4,6 +4,7 @@ import { AuditAction } from '../audit/audit-action.enum';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { AuthUser } from '../auth/auth-user.interface';
 import { Role } from '../common/enums/role.enum';
+import { fakeDataSource } from '../common/testing/fake-data-source';
 import {
   ConflictError,
   NotFoundError,
@@ -65,6 +66,7 @@ describe('ApplicationWorkflowService', () => {
   let users: { findById: jest.Mock };
   let audit: { record: jest.Mock };
   let riskReviews: { enqueue: jest.Mock };
+  let tx: ReturnType<typeof fakeDataSource>;
   let service: ApplicationWorkflowService;
 
   const reviewerUser = (over: Partial<User> = {}) =>
@@ -79,12 +81,14 @@ describe('ApplicationWorkflowService', () => {
     users = { findById: jest.fn().mockResolvedValue(reviewerUser()) };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     riskReviews = { enqueue: jest.fn().mockResolvedValue(true) };
+    tx = fakeDataSource(repo);
     service = new ApplicationWorkflowService(
       repo as unknown as Repository<MerchantApplication>,
       new PolicyService(),
       users as unknown as UsersService,
       audit as unknown as AuditRecorder,
       riskReviews as unknown as RiskReviewService,
+      tx.dataSource,
     );
   });
 
@@ -113,6 +117,7 @@ describe('ApplicationWorkflowService', () => {
             entityId: 'app1',
             actor: salesA,
           }),
+          tx.manager,
         );
       },
     );
@@ -209,6 +214,7 @@ describe('ApplicationWorkflowService', () => {
             reassigned: false,
           },
         }),
+        tx.manager,
       );
     });
 
@@ -254,6 +260,7 @@ describe('ApplicationWorkflowService', () => {
             reassigned: true,
           },
         }),
+        tx.manager,
       );
     });
 
@@ -312,6 +319,7 @@ describe('ApplicationWorkflowService', () => {
           action: AuditAction.DECISION_RECORDED,
           metadata: { decision, reason: reason ?? null },
         }),
+        tx.manager,
       );
     });
 
@@ -415,6 +423,7 @@ describe('ApplicationWorkflowService', () => {
           actor: admin,
           metadata: { run: 2 },
         }),
+        tx.manager,
       );
     });
 
@@ -478,6 +487,146 @@ describe('ApplicationWorkflowService', () => {
       const err = await service.retryRiskReview(admin, 'app1').catch((e) => e);
       expect(err).toBeInstanceOf(RiskReviewUnavailableError);
       expect(err.status).toBe(503);
+    });
+  });
+
+  describe('audit and transactions', () => {
+    const inReview = () =>
+      makeApp({
+        status: S.IN_REVIEW,
+        assignedReviewerId: 'rev1',
+        riskStatus: RiskStatus.COMPLETED,
+      });
+
+    it.each([
+      ['submit', () => service.submit(salesA, 'app1'), makeApp()],
+      [
+        'assign',
+        () => service.assign(admin, 'app1', 'rev1'),
+        makeApp({ status: S.SUBMITTED }),
+      ],
+      [
+        'decide',
+        () => service.decide(rev1, 'app1', ReviewDecision.APPROVED),
+        inReview(),
+      ],
+    ])(
+      '%s: the change and its audit record share one transaction',
+      async (_n, act, app) => {
+        repo.findOneBy.mockResolvedValue(app);
+        await act();
+
+        expect(tx.transaction).toHaveBeenCalledTimes(1);
+        expect(audit.record).toHaveBeenCalledTimes(1);
+        expect(audit.record.mock.calls[0][1]).toBe(tx.manager);
+        // the UPDATE ran through the same transaction's repository, before the audit insert
+        expect(repo.update.mock.invocationCallOrder[0]).toBeLessThan(
+          audit.record.mock.invocationCallOrder[0],
+        );
+      },
+    );
+
+    it.each([
+      ['submit', () => service.submit(salesA, 'app1'), makeApp()],
+      [
+        'assign',
+        () => service.assign(admin, 'app1', 'rev1'),
+        makeApp({ status: S.SUBMITTED }),
+      ],
+      [
+        'decide',
+        () => service.decide(rev1, 'app1', ReviewDecision.APPROVED),
+        inReview(),
+      ],
+    ])(
+      '%s: if the audit write fails the action fails (fail closed)',
+      async (_n, act, app) => {
+        repo.findOneBy.mockResolvedValue(app);
+        audit.record.mockRejectedValue(new Error('audit table unavailable'));
+        await expect(act()).rejects.toThrow('audit table unavailable');
+      },
+    );
+
+    it('submit: does not queue a review for a change that was rolled back', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      audit.record.mockRejectedValue(new Error('audit table unavailable'));
+
+      await service.submit(salesA, 'app1').catch(() => undefined);
+
+      expect(riskReviews.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('submit: queues the review only after the transaction has committed', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      await service.submit(salesA, 'app1');
+      expect(riskReviews.enqueue.mock.invocationCallOrder[0]).toBeGreaterThan(
+        audit.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('submit: records the new run number in the audit metadata', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      repo.findOneByOrFail.mockResolvedValue(makeApp({ riskReviewRun: 4 }));
+      await service.submit(salesA, 'app1');
+      expect(audit.record.mock.calls[0][0].metadata).toEqual({
+        from: S.DRAFT,
+        to: S.SUBMITTED,
+        riskReviewRun: 4,
+      });
+    });
+
+    it('retry: audit and the new run commit together, and the job is queued afterwards', async () => {
+      repo.findOneBy.mockResolvedValue(
+        makeApp({
+          status: S.SUBMITTED,
+          riskStatus: RiskStatus.FAILED,
+          riskReviewRun: 1,
+        }),
+      );
+      repo.findOneByOrFail.mockResolvedValue(makeApp({ riskReviewRun: 2 }));
+
+      await service.retryRiskReview(admin, 'app1');
+
+      expect(audit.record.mock.calls[0][1]).toBe(tx.manager);
+      expect(riskReviews.enqueue.mock.invocationCallOrder[0]).toBeGreaterThan(
+        audit.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('decide: puts the free-text reason through to the audit event (the sanitizer masks it later)', async () => {
+      repo.findOneBy.mockResolvedValue(inReview());
+      await service.decide(
+        rev1,
+        'app1',
+        ReviewDecision.REJECTED,
+        'ask pat@example.com',
+      );
+      expect(audit.record.mock.calls[0][0].metadata).toEqual({
+        decision: 'REJECTED',
+        reason: 'ask pat@example.com',
+      });
+    });
+
+    it.each([
+      [
+        'assigning the reviewer who already holds it',
+        () => service.assign(admin, 'app1', 'rev1'),
+        makeApp({ status: S.IN_REVIEW, assignedReviewerId: 'rev1' }),
+      ],
+      [
+        'an invalid transition',
+        () => service.submit(salesA, 'app1'),
+        makeApp({ status: S.SUBMITTED }),
+      ],
+      [
+        'a foreign application',
+        () => service.submit(salesB, 'app1'),
+        makeApp(),
+      ],
+    ])('writes no audit record for %s', async (_n, act, app) => {
+      repo.findOneBy.mockResolvedValue(app);
+      await act().catch(() => undefined);
+      expect(audit.record).not.toHaveBeenCalled();
     });
   });
 });

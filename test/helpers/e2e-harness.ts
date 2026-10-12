@@ -12,6 +12,7 @@ import { Role } from '../../src/common/enums/role.enum';
 import { RISK_REVIEW_QUEUE } from '../../src/queue/queue.constants';
 import { RiskProviderClient } from '../../src/risk-review/risk-provider';
 import { User } from '../../src/users/user.entity';
+import { purgeTestData } from './purge-test-data';
 
 export type TestUserKey = 'salesA' | 'salesB' | 'admin' | 'rev1' | 'rev2';
 
@@ -23,7 +24,7 @@ const ROLES: Record<TestUserKey, Role> = {
   rev2: Role.REVIEWER,
 };
 
-const PASSWORD = 'E2e-Passw0rd!';
+export const E2E_PASSWORD = 'E2e-Passw0rd!';
 
 export const validApplicationPayload = {
   businessName: 'Test Cafe',
@@ -83,7 +84,7 @@ export const createHarness = async (options: HarnessOptions = {}) => {
   const tag = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const users = {} as Record<TestUserKey, User>;
   const tokens = {} as Record<TestUserKey, string>;
-  const hash = await bcrypt.hash(PASSWORD, 4);
+  const hash = await bcrypt.hash(E2E_PASSWORD, 4);
 
   for (const key of Object.keys(ROLES) as TestUserKey[]) {
     const repo = ds.getRepository(User);
@@ -98,7 +99,7 @@ export const createHarness = async (options: HarnessOptions = {}) => {
     );
     const login = await request(app.getHttpServer())
       .post('/auth/login')
-      .send({ email: users[key].email, password: PASSWORD });
+      .send({ email: users[key].email, password: E2E_PASSWORD });
     if (login.status !== 200) {
       throw new Error(`harness login failed for ${key}: ${login.status}`);
     }
@@ -131,22 +132,15 @@ export const createHarness = async (options: HarnessOptions = {}) => {
     return res.body as { id: string };
   };
 
+  /** Tests that create audit rows with no entity (e.g. unknown-email logins) register them here. */
+  const extraCorrelationIds: string[] = [];
+
   const close = async () => {
-    const ids = Object.values(users).map((u) => u.id);
-    if (ids.length) {
-      await ds
-        .createQueryBuilder()
-        .delete()
-        .from(MerchantApplication)
-        .where('"createdById" IN (:...ids)', { ids })
-        .execute();
-      await ds
-        .createQueryBuilder()
-        .delete()
-        .from(User)
-        .where('id IN (:...ids)', { ids })
-        .execute();
-    }
+    await purgeTestData(
+      ds,
+      Object.values(users).map((u) => u.id),
+      { correlationIds: extraCorrelationIds },
+    );
     // Drop this run's Redis keys (the prefix is unique to this test file).
     await queue.obliterate({ force: true }).catch(() => undefined);
     await app.close();
@@ -160,6 +154,7 @@ export const createHarness = async (options: HarnessOptions = {}) => {
     as,
     apps,
     queue,
+    extraCorrelationIds,
     createApplication,
     close,
     http: () => request(app.getHttpServer()),

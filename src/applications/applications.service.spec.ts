@@ -1,7 +1,10 @@
 import { Repository } from 'typeorm';
+import { AuditAction } from '../audit/audit-action.enum';
+import { AuditRecorder } from '../audit/audit-recorder';
 import { AuthUser } from '../auth/auth-user.interface';
 import { Role } from '../common/enums/role.enum';
 import { NotFoundError } from '../common/errors/domain.error';
+import { fakeDataSource } from '../common/testing/fake-data-source';
 import { PolicyService } from '../policies/policy.service';
 import { ApplicationNotEditableError } from './application.errors';
 import { ApplicationsService } from './applications.service';
@@ -40,6 +43,8 @@ describe('ApplicationsService', () => {
     findAndCount: jest.Mock;
     update: jest.Mock;
   };
+  let audit: { record: jest.Mock };
+  let tx: ReturnType<typeof fakeDataSource>;
   let service: ApplicationsService;
 
   beforeEach(() => {
@@ -51,9 +56,13 @@ describe('ApplicationsService', () => {
       findAndCount: jest.fn().mockResolvedValue([[], 0]),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    audit = { record: jest.fn().mockResolvedValue(undefined) };
+    tx = fakeDataSource(repo);
     service = new ApplicationsService(
       repo as unknown as Repository<MerchantApplication>,
       new PolicyService(),
+      tx.dataSource,
+      audit as unknown as AuditRecorder,
     );
   });
 
@@ -79,6 +88,66 @@ describe('ApplicationsService', () => {
       expect(saved.createdById).toBe('salesA');
       expect(saved.status).toBe(S.DRAFT);
       expect(saved.riskStatus).toBe(RiskStatus.NOT_STARTED);
+    });
+  });
+
+  describe('create: audit', () => {
+    const setup = () => {
+      repo.save.mockImplementation((x) =>
+        Promise.resolve({ ...x, id: 'new-id' }),
+      );
+      repo.findOneByOrFail.mockResolvedValue(makeApp({ id: 'new-id' }));
+    };
+
+    it('writes the row and its audit record inside ONE transaction', async () => {
+      setup();
+      await service.create(salesA, {
+        businessName: 'Cafe',
+      } as CreateApplicationDto);
+
+      expect(tx.transaction).toHaveBeenCalledTimes(1);
+      expect(audit.record).toHaveBeenCalledTimes(1);
+      // the audit write receives the transaction's manager, so it joins it
+      expect(audit.record.mock.calls[0][1]).toBe(tx.manager);
+      expect(audit.record.mock.calls[0][0]).toEqual({
+        action: AuditAction.APPLICATION_CREATED,
+        actor: salesA,
+        entityType: 'MerchantApplication',
+        entityId: 'new-id',
+        metadata: { initialStatus: S.DRAFT },
+      });
+    });
+
+    it('records the audit entry after the row is saved', async () => {
+      setup();
+      await service.create(salesA, {
+        businessName: 'Cafe',
+      } as CreateApplicationDto);
+      expect(repo.save.mock.invocationCallOrder[0]).toBeLessThan(
+        audit.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('lets a failing audit write abort the creation (the transaction rolls back)', async () => {
+      setup();
+      audit.record.mockRejectedValue(new Error('audit table unavailable'));
+      await expect(
+        service.create(salesA, {
+          businessName: 'Cafe',
+        } as CreateApplicationDto),
+      ).rejects.toThrow('audit table unavailable');
+    });
+
+    it('puts no personal data in the audit metadata', async () => {
+      setup();
+      await service.create(salesA, {
+        businessName: 'Cafe',
+        ownerEmail: 'pat@example.com',
+        ownerTaxId: '123-456-789',
+      } as CreateApplicationDto);
+      const json = JSON.stringify(audit.record.mock.calls[0][0]);
+      expect(json).not.toContain('pat@example.com');
+      expect(json).not.toContain('123-456-789');
     });
   });
 
@@ -126,6 +195,62 @@ describe('ApplicationsService', () => {
       expect(where.id).toBe('app1');
       expect(where.status._value).toEqual([S.DRAFT, S.INFO_REQUESTED]);
       expect(patch).toEqual({ businessName: 'New' });
+    });
+
+    it('audits the update with field NAMES only, in the same transaction', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      repo.findOneByOrFail.mockResolvedValue(makeApp());
+
+      await service.update(salesA, 'app1', {
+        ownerTaxId: '999-888-777',
+        businessName: 'Renamed',
+        ownerEmail: 'new@example.com',
+      });
+
+      expect(audit.record).toHaveBeenCalledTimes(1);
+      const [event, manager] = audit.record.mock.calls[0];
+      expect(manager).toBe(tx.manager);
+      expect(event).toEqual({
+        action: AuditAction.APPLICATION_UPDATED,
+        actor: salesA,
+        entityType: 'MerchantApplication',
+        entityId: 'app1',
+        metadata: {
+          changedFields: ['businessName', 'ownerEmail', 'ownerTaxId'],
+        },
+      });
+      // values never reach the trail
+      const json = JSON.stringify(event);
+      for (const value of ['999-888-777', 'Renamed', 'new@example.com']) {
+        expect(json).not.toContain(value);
+      }
+    });
+
+    it.each([
+      ['nothing changed', makeApp(), { businessName: undefined }],
+      [
+        'the application is locked',
+        makeApp({ status: S.APPROVED }),
+        { businessName: 'x' },
+      ],
+      [
+        'another SALES user tries',
+        makeApp({ createdById: 'other' }),
+        { businessName: 'x' },
+      ],
+    ])('writes no audit record when %s', async (_n, app, dto) => {
+      repo.findOneBy.mockResolvedValue(app);
+      await service.update(salesA, 'app1', dto).catch(() => undefined);
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('writes no audit record when a concurrent submit won the race (0 rows updated)', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      repo.update.mockResolvedValue({ affected: 0 });
+      await service
+        .update(salesA, 'app1', { businessName: 'x' })
+        .catch(() => undefined);
+      expect(audit.record).not.toHaveBeenCalled();
     });
 
     it('drops undefined fields and skips the UPDATE when nothing changed', async () => {

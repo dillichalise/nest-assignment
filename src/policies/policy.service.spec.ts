@@ -106,6 +106,15 @@ describe('PolicyService', () => {
     });
   });
 
+  describe('audit trail', () => {
+    it('is readable by ADMIN only (not even the assigned reviewer or the owner)', () => {
+      expect(policy.canViewAuditTrail(admin)).toBe(true);
+      for (const who of [salesA, salesB, reviewer1, reviewer2]) {
+        expect(policy.canViewAuditTrail(who)).toBe(false);
+      }
+    });
+  });
+
   describe('risk review', () => {
     it('only ADMIN may retry a failed review', () => {
       expect(policy.canManageRiskReview(admin)).toBe(true);

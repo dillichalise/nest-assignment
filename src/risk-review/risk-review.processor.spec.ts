@@ -91,6 +91,7 @@ describe('RiskReviewProcessor', () => {
         'app-1',
         1,
         assessment,
+        'risk-review-app-1-1', // correlation id: the job id
       );
       expect(reviews.markFailed).not.toHaveBeenCalled();
     });
@@ -139,8 +140,11 @@ describe('RiskReviewProcessor', () => {
       expect(started).toHaveLength(1);
       expect(started[0][0]).toMatchObject({
         actor: null,
+        entityType: 'MerchantApplication',
         entityId: 'app-1',
         metadata: { run: 1 },
+        // there is no HTTP request here: the job id is the correlation id
+        correlationId: 'risk-review-app-1-1',
       });
     });
   });
@@ -255,6 +259,7 @@ describe('RiskReviewProcessor', () => {
         1,
         'PROVIDER_UNAVAILABLE',
         3,
+        'risk-review-app-1-1',
       );
     });
 
@@ -268,6 +273,7 @@ describe('RiskReviewProcessor', () => {
         1,
         'PROVIDER_UNAVAILABLE',
         1,
+        'risk-review-app-1-1',
       );
     });
 
@@ -284,6 +290,7 @@ describe('RiskReviewProcessor', () => {
         1,
         'INPUT_REJECTED',
         1,
+        'risk-review-app-1-1',
       );
     });
 
@@ -303,6 +310,7 @@ describe('RiskReviewProcessor', () => {
         1,
         'UNEXPECTED_ERROR',
         3,
+        'risk-review-app-1-1',
       );
     });
 

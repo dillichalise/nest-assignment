@@ -1,6 +1,7 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { NextFunction, Request, Response } from 'express';
+import { runWithRequestContext } from '../context/request-context';
 
 export const REQUEST_ID_HEADER = 'x-request-id';
 const MAX_LENGTH = 128;
@@ -23,6 +24,7 @@ export class RequestIdMiddleware implements NestMiddleware {
         : randomUUID();
     req.requestId = id;
     res.setHeader(REQUEST_ID_HEADER, id);
-    next();
+    // Everything downstream of this request runs inside the context.
+    runWithRequestContext({ requestId: id }, () => next());
   }
 }

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpCode,
   Param,
@@ -23,6 +24,13 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
 import { ApiErrorResponses } from '../common/errors/api-error-responses.decorator';
 import { PolicyService } from '../policies/policy.service';
+import { AuditEntityType } from '../audit/audit-entity-type';
+import { AuditService } from '../audit/audit.service';
+import {
+  AuditLogResponseDto,
+  PaginatedAuditLogsDto,
+} from '../audit/dto/audit-log-response.dto';
+import { AuditLogsQueryDto } from '../audit/dto/audit-logs-query.dto';
 import { ApplicationWorkflowService } from './application-workflow.service';
 import { ApplicationsService } from './applications.service';
 import {
@@ -43,6 +51,7 @@ export class ApplicationsController {
     private readonly applications: ApplicationsService,
     private readonly workflow: ApplicationWorkflowService,
     private readonly policy: PolicyService,
+    private readonly auditTrail: AuditService,
   ) {}
 
   @Post()
@@ -92,6 +101,35 @@ export class ApplicationsController {
       revealSensitive: this.policy.canViewSensitiveOwnerData(user),
       includeRiskDetails: this.policy.canViewRiskDetails(user),
     });
+  }
+
+  @Get(':id/audit')
+  @Roles(Role.ADMIN)
+  @ApiOperation({
+    summary: 'Audit trail of one application (ADMIN only)',
+    description:
+      'Every significant action on the application, oldest first: creation, edits (field names only), submission, reviewer assignment, risk-review start/completion/failure/retry and the decision. Metadata is sanitized: secrets are removed and emails and phone numbers are masked.',
+  })
+  @ApiOkResponse({ type: PaginatedAuditLogsDto })
+  @ApiErrorResponses(400, 401, 403, 404)
+  async auditTrailOf(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: AuditLogsQueryDto,
+  ): Promise<PaginatedAuditLogsDto> {
+    // Defense in depth behind @Roles, and the single place the rule is named.
+    if (!this.policy.canViewAuditTrail(user)) {
+      throw new ForbiddenException('Only an admin may read the audit trail');
+    }
+    // 404 for an unknown application rather than an empty page.
+    await this.applications.findOne(user, id);
+
+    const { items, ...meta } = await this.auditTrail.listForEntity(
+      AuditEntityType.APPLICATION,
+      id,
+      query,
+    );
+    return { items: items.map((l) => AuditLogResponseDto.from(l)), ...meta };
   }
 
   @Patch(':id')

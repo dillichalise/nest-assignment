@@ -10,6 +10,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/app.setup';
 import { Role } from '../src/common/enums/role.enum';
 import { User } from '../src/users/user.entity';
+import { purgeTestData } from './helpers/purge-test-data';
 
 describe('Applications: CRUD & object-level isolation (e2e)', () => {
   const PASSWORD = 'E2e-Passw0rd!';
@@ -99,21 +100,10 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
   });
 
   afterAll(async () => {
-    const ids = Object.values(users).map((u) => u.id);
-    if (ids.length) {
-      await ds
-        .createQueryBuilder()
-        .delete()
-        .from(MerchantApplication)
-        .where('"createdById" IN (:...ids)', { ids })
-        .execute();
-      await ds
-        .createQueryBuilder()
-        .delete()
-        .from(User)
-        .where('id IN (:...ids)', { ids })
-        .execute();
-    }
+    await purgeTestData(
+      ds,
+      Object.values(users).map((u) => u.id),
+    );
     await app.close();
   });
 

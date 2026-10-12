@@ -2,6 +2,9 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { AuditAction } from '../audit/audit-action.enum';
+import { AuditEntityType } from '../audit/audit-entity-type';
+import { AuditRecorder } from '../audit/audit-recorder';
 import { User } from '../users/user.entity';
 import { UsersService } from '../users/users.service';
 import { JwtPayload } from './auth-user.interface';
@@ -18,6 +21,7 @@ export class AuthService {
     private readonly users: UsersService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly audit: AuditRecorder,
   ) {}
 
   async login(email: string, password: string): Promise<LoginResponseDto> {
@@ -26,7 +30,25 @@ export class AuthService {
     const passwordMatches = await bcrypt.compare(password, hash);
 
     // One generic error for unknown email, wrong password and inactive user.
+    // The CLIENT never learns which; the audit trail records the real reason.
     if (!user || !passwordMatches || !user.isActive) {
+      await this.audit.record({
+        action: AuditAction.LOGIN_FAILED,
+        // The account that was targeted, if there is one: useful for spotting
+        // someone hammering a single user. null for an unknown email.
+        actor: user ? { id: user.id, role: user.role } : null,
+        entityType: AuditEntityType.USER,
+        entityId: user?.id ?? null,
+        // Never the password. The email is masked by the sanitizer.
+        metadata: {
+          reason: !user
+            ? 'UNKNOWN_EMAIL'
+            : !passwordMatches
+              ? 'BAD_PASSWORD'
+              : 'INACTIVE_USER',
+          email,
+        },
+      });
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -35,8 +57,17 @@ export class AuthService {
       email: user.email,
       role: user.role,
     };
+    const accessToken = await this.jwt.signAsync(payload);
+
+    // Never the token itself.
+    await this.audit.record({
+      action: AuditAction.LOGIN_SUCCEEDED,
+      actor: { id: user.id, role: user.role },
+      entityType: AuditEntityType.USER,
+      entityId: user.id,
+    });
     return {
-      accessToken: await this.jwt.signAsync(payload),
+      accessToken,
       expiresIn: getJwtExpiresInSeconds(this.config),
     };
   }

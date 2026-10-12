@@ -87,6 +87,15 @@ export class PolicyService {
     return user.role === Role.ADMIN || user.role === Role.REVIEWER;
   }
 
+  /**
+   * The audit trail records who did what, including other users' actions and
+   * system events, so it is ADMIN-only. The assigned reviewer sees the
+   * application and its risk result, not the operational history around it.
+   */
+  canViewAuditTrail(user: AuthUser): boolean {
+    return user.role === Role.ADMIN;
+  }
+
   /** Re-triggering a failed risk review is an ADMIN-only operational action. */
   canManageRiskReview(user: AuthUser): boolean {
     return user.role === Role.ADMIN;

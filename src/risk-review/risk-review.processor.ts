@@ -7,6 +7,7 @@ import { Repository } from 'typeorm';
 import { RiskStatus } from '../applications/enums/risk-status.enum';
 import { MerchantApplication } from '../applications/merchant-application.entity';
 import { AuditAction } from '../audit/audit-action.enum';
+import { AuditEntityType } from '../audit/audit-entity-type';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { RISK_REVIEW_QUEUE } from '../queue/queue.constants';
 import { RiskProviderClient, RiskProviderError } from './risk-provider';
@@ -90,9 +91,10 @@ export class RiskReviewProcessor
       await this.audit.record({
         action: AuditAction.RISK_REVIEW_STARTED,
         actor: null,
-        entityType: 'MerchantApplication',
+        entityType: AuditEntityType.APPLICATION,
         entityId: applicationId,
         metadata: { run },
+        correlationId: job.id,
       });
     }
 
@@ -110,6 +112,7 @@ export class RiskReviewProcessor
         applicationId,
         run,
         assessment,
+        job.id,
       );
       return applied
         ? { completed: true, score: assessment.score }
@@ -143,7 +146,7 @@ export class RiskReviewProcessor
     if (isFinal) {
       const code =
         error instanceof RiskProviderError ? error.code : 'UNEXPECTED_ERROR';
-      await this.reviews.markFailed(applicationId, run, code, attempt);
+      await this.reviews.markFailed(applicationId, run, code, attempt, job.id);
     }
     return !retryable ? new UnrecoverableError(message) : error;
   }
