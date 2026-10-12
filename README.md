@@ -44,6 +44,22 @@ curl http://localhost:5001/health
 Interactive API documentation: **http://localhost:5001/docs** (Swagger UI; the raw
 OpenAPI document is at `/docs-json`).
 
+### Running the API in Docker (optional)
+
+The default setup runs the API on your host. To run it in a container as well (it applies
+pending migrations on start), use the `app` compose profile:
+
+```bash
+npm run docker:app:up      # build and start Postgres, Redis and the API
+npm run docker:app:seed    # demo users
+npm run docker:app:logs    # follow API logs
+npm run docker:app:down    # stop everything
+```
+
+Set `API_PORT` if 5001 is taken on your host. The container uses `NODE_ENV=development`
+by default so the published local-dev `FIELD_ENCRYPTION_KEY` is accepted; set
+`API_NODE_ENV=production` together with your own secrets for anything real.
+
 ### Demo users
 
 `npm run seed` creates these users, all with the password in `SEED_PASSWORD`
@@ -216,6 +232,7 @@ Unit tests (`*.spec.ts`) sit next to the code they test.
 | `npm run start:dev` | run with file watching |
 | `npm run build` / `npm run start:prod` | compile / run the compiled app |
 | `npm run docker:up` / `docker:down` | start / stop Postgres and Redis |
+| `npm run docker:app:up` / `:down` / `:logs` / `:seed` | run the API in a container too (compose `app` profile) |
 | `npm run migration:run` / `migration:revert` | apply / undo the last migration |
 | `npm run migration:generate -- src/database/migrations/Name` | write a migration from entity changes (review it before running) |
 | `npm run migration:create -- src/database/migrations/Name` | an empty migration to fill in by hand |

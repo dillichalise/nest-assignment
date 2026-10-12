@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.git
+.idea
+.env
+.env.*
+!.env.example
+docs
+claude-prompts
+test
+*.md
+Dockerfile
+docker-compose*.yml

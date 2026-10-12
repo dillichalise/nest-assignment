@@ -29,6 +29,39 @@ services:
       timeout: 5s
       retries: 5
 
+  # Optional: run the API itself in a container.  `docker compose --profile app up --build`
+  # Plain `docker compose up` (npm run docker:up) still starts only Postgres and Redis.
+  api:
+    profiles: ['app']
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Inside the compose network the services use their own hostnames and internal ports.
+      # NODE_ENV defaults to development so the published local-dev FIELD_ENCRYPTION_KEY
+      # is accepted; for anything real set NODE_ENV=production plus your own secrets.
+      NODE_ENV: ${API_NODE_ENV:-development}
+      PORT: 5001
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - '${API_PORT:-5001}:5001'
+    # Apply pending migrations, then start the API.
+    command:
+      [
+        'sh',
+        '-c',
+        'node node_modules/typeorm/cli.js -d dist/database/data-source.js migration:run && node dist/main',
+      ]
+
 volumes:
   postgres_data:
   redis_data:
