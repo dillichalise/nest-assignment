@@ -35,9 +35,18 @@ describe('Async risk review (e2e)', () => {
   afterAll(() => h.close());
 
   beforeEach(() => provider.reset());
-  afterEach(() => {
+  afterEach(async () => {
     // Never leave a job blocked: app.close() waits for active jobs.
     held.splice(0).forEach((release) => release());
+    // Background work must not leak into the next test: a late provider call or
+    // audit write from this test's application would pollute its assertions.
+    await waitFor(
+      async () => {
+        const c = await h.queue.getJobCounts('active', 'waiting', 'delayed');
+        return c.active + c.waiting + c.delayed === 0;
+      },
+      { what: 'the risk-review queue to go idle' },
+    );
     jest.restoreAllMocks();
   });
 
@@ -327,9 +336,10 @@ describe('Async risk review (e2e)', () => {
     });
 
     it('a job whose application no longer exists finishes quietly', async () => {
+      const orphanId = randomUUID();
       const job = await h.queue.add(
         'assess',
-        { applicationId: randomUUID(), run: 1 },
+        { applicationId: orphanId, run: 1 },
         { removeOnComplete: false },
       );
       await waitFor(async () => job.isCompleted(), {
@@ -338,7 +348,7 @@ describe('Async risk review (e2e)', () => {
 
       const finished = await h.queue.getJob(job.id as string);
       expect(finished?.returnvalue).toEqual({ skipped: 'application-missing' });
-      expect(provider.calls).toHaveLength(0);
+      expect(provider.callsFor(orphanId)).toHaveLength(0);
     });
 
     it('a stale job can never overwrite the result of a newer submission', async () => {

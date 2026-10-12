@@ -202,6 +202,14 @@ no retention or archival policy.
   time does not reveal which accounts exist.
 - Role and user id are taken from the verified token only, never from the
   request body or headers.
+- **Known limitation: tokens are stateless.** The JWT guard verifies signature and
+  expiry but does not look the user up, so a user who is **deactivated after logging
+  in keeps API access (except `/auth/me`) until their token expires** (1 hour). The
+  same applies to a role change. Closing the gap needs a user lookup per request or
+  a token deny-list. A test pins today's behaviour
+  (`authentication.e2e-spec.ts`, "KNOWN LIMITATION"); change both together.
+- Forged, expired, tampered, unsigned (`alg: none`) and asymmetric (RS256) tokens are
+  all rejected, and identity is never read from a body, query string or header.
 
 ## 8. What production would add
 

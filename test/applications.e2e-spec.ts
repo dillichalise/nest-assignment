@@ -1,28 +1,10 @@
-import { INestApplication } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'crypto';
-import request from 'supertest';
-import { DataSource } from 'typeorm';
-import { ApplicationStatus } from '../src/applications/enums/application-status.enum';
-import { MerchantApplication } from '../src/applications/merchant-application.entity';
-import { AppModule } from '../src/app.module';
-import { configureApp } from '../src/app.setup';
 import { Role } from '../src/common/enums/role.enum';
-import { User } from '../src/users/user.entity';
-import { purgeTestData } from './helpers/purge-test-data';
+import { createHarness, Harness, TestUserKey } from './helpers/e2e-harness';
+import { ApplicationStatus } from '../src/applications/enums/application-status.enum';
 
 describe('Applications: CRUD & object-level isolation (e2e)', () => {
-  const PASSWORD = 'E2e-Passw0rd!';
-  const tag = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  let app: INestApplication;
-  let ds: DataSource;
-  const users = {} as Record<
-    'salesA' | 'salesB' | 'admin' | 'rev1' | 'rev2',
-    User
-  >;
-  const tokens = {} as Record<keyof typeof users, string>;
+  let h: Harness;
 
   const payload = {
     businessName: 'Test Cafe',
@@ -37,22 +19,14 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
     currency: 'USD',
   };
 
-  const as = (who: keyof typeof users) => ({
-    get: (url: string) =>
-      request(app.getHttpServer())
-        .get(url)
-        .set('Authorization', `Bearer ${tokens[who]}`),
-    post: (url: string) =>
-      request(app.getHttpServer())
-        .post(url)
-        .set('Authorization', `Bearer ${tokens[who]}`),
-    patch: (url: string) =>
-      request(app.getHttpServer())
-        .patch(url)
-        .set('Authorization', `Bearer ${tokens[who]}`),
+  // The shared harness provides the isolated database, the five test users and
+  // their tokens; these thin aliases keep the tests below readable.
+  const as = (who: TestUserKey) => h.as(who);
+  const users = new Proxy({} as Harness['users'], {
+    get: (_t, key: TestUserKey) => h.users[key],
   });
 
-  const createAs = async (who: keyof typeof users, over: object = {}) => {
+  const createAs = async (who: TestUserKey, over: object = {}) => {
     const res = await as(who)
       .post('/applications')
       .send({ ...payload, ...over });
@@ -61,59 +35,18 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
   };
 
   const setStatus = (id: string, status: ApplicationStatus) =>
-    ds.getRepository(MerchantApplication).update({ id }, { status });
+    h.apps().update({ id }, { status });
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-    app = moduleRef.createNestApplication();
-    configureApp(app);
-    await app.init();
-    ds = app.get(DataSource);
-
-    const hash = await bcrypt.hash(PASSWORD, 4);
-    const defs: [keyof typeof users, Role][] = [
-      ['salesA', Role.SALES],
-      ['salesB', Role.SALES],
-      ['admin', Role.ADMIN],
-      ['rev1', Role.REVIEWER],
-      ['rev2', Role.REVIEWER],
-    ];
-    for (const [key, role] of defs) {
-      const repo = ds.getRepository(User);
-      users[key] = await repo.save(
-        repo.create({
-          email: `${tag}-${key}@example.com`.toLowerCase(),
-          name: key,
-          role,
-          passwordHash: hash,
-          isActive: true,
-        }),
-      );
-      const login = await request(app.getHttpServer())
-        .post('/auth/login')
-        .send({ email: users[key].email, password: PASSWORD });
-      expect(login.status).toBe(200);
-      tokens[key] = login.body.accessToken;
-    }
+    h = await createHarness();
   });
 
-  afterAll(async () => {
-    await purgeTestData(
-      ds,
-      Object.values(users).map((u) => u.id),
-    );
-    await app.close();
-  });
+  afterAll(() => h.close());
 
   describe('authentication & role gates', () => {
     it('rejects requests without a token', async () => {
-      await request(app.getHttpServer()).get('/applications').expect(401);
-      await request(app.getHttpServer())
-        .post('/applications')
-        .send(payload)
-        .expect(401);
+      await h.http().get('/applications').expect(401);
+      await h.http().post('/applications').send(payload).expect(401);
     });
 
     it('REVIEWER cannot create or update applications (403)', async () => {
@@ -230,9 +163,15 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
     });
 
     it("SALES B's list never contains SALES A's applications", async () => {
-      const res = await as('salesB').get('/applications').expect(200);
-      expect(res.body.total).toBe(0);
-      expect(res.body.items).toEqual([]);
+      // About WHAT is visible, not how many: other tests may have created
+      // applications for salesB, in any order.
+      const res = await as('salesB').get('/applications?limit=100').expect(200);
+      expect(res.body.items.map((i: { id: string }) => i.id)).not.toContain(
+        appIdA,
+      );
+      for (const item of res.body.items) {
+        expect(item.createdById).toBe(users.salesB.id);
+      }
     });
 
     it('SALES A list only contains their own', async () => {
@@ -245,9 +184,14 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
 
     it('a status filter cannot be used to widen the scope', async () => {
       const res = await as('salesB')
-        .get('/applications?status=DRAFT')
+        .get('/applications?status=DRAFT&limit=100')
         .expect(200);
-      expect(res.body.total).toBe(0);
+      expect(res.body.items.map((i: { id: string }) => i.id)).not.toContain(
+        appIdA,
+      );
+      for (const item of res.body.items) {
+        expect(item.createdById).toBe(users.salesB.id);
+      }
     });
   });
 
@@ -266,9 +210,7 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
       const { id } = await createAs('salesA');
       await as('rev1').get(`/applications/${id}`).expect(404);
 
-      await ds
-        .getRepository(MerchantApplication)
-        .update({ id }, { assignedReviewerId: users.rev1.id });
+      await h.apps().update({ id }, { assignedReviewerId: users.rev1.id });
 
       await as('rev1').get(`/applications/${id}`).expect(200);
       await as('rev2').get(`/applications/${id}`).expect(404);
@@ -360,25 +302,25 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
   });
 
   describe('listing: filtering & pagination', () => {
-    // salesB starts empty, so counts are deterministic.
+    // A brand-new user, so exact totals cannot depend on what other tests created.
+    let lister: Awaited<ReturnType<Harness['createExtraUser']>>;
     beforeAll(async () => {
+      lister = await h.createExtraUser(Role.SALES, 'lister');
       const ids: string[] = [];
       for (let i = 1; i <= 3; i++) {
-        ids.push((await createAs('salesB', { businessName: `List ${i}` })).id);
+        ids.push(
+          (await lister.createApplication({ businessName: `List ${i}` })).id,
+        );
       }
       await setStatus(ids[0], ApplicationStatus.SUBMITTED);
     });
 
     it('paginates with total, page and limit', async () => {
-      const p1 = await as('salesB')
-        .get('/applications?page=1&limit=2')
-        .expect(200);
+      const p1 = await lister.get('/applications?page=1&limit=2').expect(200);
       expect(p1.body).toMatchObject({ total: 3, page: 1, limit: 2 });
       expect(p1.body.items).toHaveLength(2);
 
-      const p2 = await as('salesB')
-        .get('/applications?page=2&limit=2')
-        .expect(200);
+      const p2 = await lister.get('/applications?page=2&limit=2').expect(200);
       expect(p2.body.items).toHaveLength(1);
 
       const ids = [...p1.body.items, ...p2.body.items].map(
@@ -388,7 +330,7 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
     });
 
     it('orders newest first', async () => {
-      const res = await as('salesB').get('/applications').expect(200);
+      const res = await lister.get('/applications').expect(200);
       const times = res.body.items.map(
         (i: { createdAt: string }) => +new Date(i.createdAt),
       );
@@ -396,27 +338,25 @@ describe('Applications: CRUD & object-level isolation (e2e)', () => {
     });
 
     it('returns an empty page (not an error) beyond the last page', async () => {
-      const res = await as('salesB')
-        .get('/applications?page=9&limit=2')
-        .expect(200);
+      const res = await lister.get('/applications?page=9&limit=2').expect(200);
       expect(res.body).toMatchObject({ items: [], total: 3, page: 9 });
     });
 
     it('filters by status', async () => {
-      const res = await as('salesB')
+      const res = await lister
         .get('/applications?status=SUBMITTED')
         .expect(200);
       expect(res.body.total).toBe(1);
       expect(res.body.items[0].status).toBe('SUBMITTED');
       expect(
-        (await as('salesB').get('/applications?status=APPROVED')).body.total,
+        (await lister.get('/applications?status=APPROVED')).body.total,
       ).toBe(0);
     });
 
     it.each(['limit=101', 'limit=0', 'page=0', 'page=abc', 'status=NOPE'])(
       'rejects invalid query "%s" with 400',
       async (qs) => {
-        await as('salesB').get(`/applications?${qs}`).expect(400);
+        await lister.get(`/applications?${qs}`).expect(400);
       },
     );
   });

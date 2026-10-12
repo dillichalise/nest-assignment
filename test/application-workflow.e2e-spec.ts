@@ -392,20 +392,25 @@ describe('Application workflow: submit, assign, decide (e2e)', () => {
     );
 
     it.each([
+      ApplicationStatus.DRAFT,
       ApplicationStatus.SUBMITTED,
       ApplicationStatus.APPROVED,
       ApplicationStatus.INFO_REQUESTED,
-    ])('returns 409 when the application is %s', async (status) => {
-      const id = await seed(status, {
-        assignedReviewerId: h.users.rev1.id,
-        riskStatus: RiskStatus.COMPLETED,
-      });
-      await h
-        .as('rev1')
-        .post(`/applications/${id}/decision`)
-        .send({ decision: 'APPROVED' })
-        .expect(409);
-    });
+      ApplicationStatus.REJECTED,
+    ])(
+      'returns 409 when the application is %s (only IN_REVIEW can be decided)',
+      async (status) => {
+        const id = await seed(status, {
+          assignedReviewerId: h.users.rev1.id,
+          riskStatus: RiskStatus.COMPLETED,
+        });
+        await h
+          .as('rev1')
+          .post(`/applications/${id}/decision`)
+          .send({ decision: 'APPROVED' })
+          .expect(409);
+      },
+    );
 
     it('lets exactly one of several simultaneous decisions win', async () => {
       const id = await inReview('rev1');

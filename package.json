@@ -21,7 +21,8 @@
     "migration:run": "npm run typeorm -- -d src/database/data-source.ts migration:run",
     "migration:revert": "npm run typeorm -- -d src/database/data-source.ts migration:revert",
     "seed": "ts-node src/database/seed.ts",
-    "test:cov": "jest --coverage"
+    "test:cov": "jest --coverage",
+    "test:e2e:random": "jest --config ./test/jest-e2e.json --randomize"
   },
   "author": "Dilli Chalise",
   "license": "ISC",

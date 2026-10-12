@@ -2,7 +2,6 @@ import './helpers/enable-risk-worker';
 import { randomUUID } from 'crypto';
 import { ApplicationStatus } from '../src/applications/enums/application-status.enum';
 import { RiskStatus } from '../src/applications/enums/risk-status.enum';
-import { MerchantApplication } from '../src/applications/merchant-application.entity';
 import { AuditAction } from '../src/audit/audit-action.enum';
 import { AuditLog } from '../src/audit/audit-log.entity';
 import { AuditService } from '../src/audit/audit.service';
@@ -529,7 +528,6 @@ describe('Audit trail (e2e)', () => {
         'nobody-at-all@example.com',
         'Wrong-Guess-123',
       ).expect(401);
-      h.extraCorrelationIds.push(unknown.body.requestId);
 
       // same client-visible answer for both
       for (const key of ['statusCode', 'error', 'message']) {
@@ -654,7 +652,6 @@ describe('Audit trail (e2e)', () => {
         metadata: { probe: true },
         correlationId: 'e2e-maintenance-probe',
       });
-      h.extraCorrelationIds.push('e2e-maintenance-probe');
 
       // without the flag: blocked. SET LOCAL ends with the transaction, so the flag cannot leak.
       await h.ds.transaction(async (m) => {
@@ -803,35 +800,77 @@ describe('Audit trail (e2e)', () => {
   });
 
   describe('no secret ever reaches the trail', () => {
-    it('across everything this suite did, no row contains a password, token, hash, tax id, email or phone', async () => {
-      const userIds = Object.values(h.users).map((u) => u.id);
-      const appIds = (
-        await h.ds
-          .getRepository(MerchantApplication)
-          .find({ where: userIds.map((c) => ({ createdById: c })) })
-      ).map((a) => a.id);
+    it('after a full lifecycle full of secrets, no audit row contains any of them', async () => {
+      // Self-contained: this test does not depend on what other tests ran
+      // before it (Jest may reorder them); it creates its own varied activity.
+      const secretEmail = 'sweep-owner@example.com';
+      const secretTaxId = '777-666-555';
+      const secretPhoneDigits = '9812345678';
+      const wrongGuess = 'Sweep-Wrong-Guess-1';
 
-      const rows = await h.ds.query(
-        `SELECT * FROM audit_logs WHERE "actorId" = ANY($1::uuid[]) OR "entityId" = ANY($2::uuid[])`,
-        [userIds, [...userIds, ...appIds]],
-      );
-      expect(rows.length).toBeGreaterThan(40); // a meaningful amount of history was swept
+      provider.handler = () => Promise.resolve(okAssessment(30));
+      const { id } = await h.createApplication('salesA', {
+        ownerEmail: secretEmail,
+        ownerTaxId: secretTaxId,
+        ownerPhone: `+977 ${secretPhoneDigits}`,
+      });
+      await h
+        .as('salesA')
+        .patch(`/applications/${id}`)
+        .send({
+          ownerTaxId: '555-444-333',
+          ownerEmail: 'sweep-new@example.com',
+        })
+        .expect(200);
+      await submit(id).expect(200);
+      await waitForRisk(id, RiskStatus.COMPLETED);
+      await h
+        .as('admin')
+        .post(`/applications/${id}/assign`)
+        .send({ reviewerId: h.users.rev1.id })
+        .expect(200);
+      await h
+        .as('rev1')
+        .post(`/applications/${id}/decision`)
+        .send({
+          decision: 'REJECTED',
+          reason: `Call ${secretEmail} or +977 ${secretPhoneDigits}`,
+        })
+        .expect(200);
+      await h
+        .http()
+        .post('/auth/login')
+        .send({ email: h.users.salesA.email, password: wrongGuess })
+        .expect(401);
+      await h
+        .http()
+        .post('/auth/login')
+        .send({ email: 'sweep-ghost@example.com', password: wrongGuess })
+        .expect(401);
+
+      // The database belongs to this test file alone, so sweep every row in it.
+      const rows = await h.ds.query('SELECT * FROM audit_logs');
+      expect(rows.length).toBeGreaterThan(10); // this test alone writes more than that
 
       const hashes: { passwordHash: string }[] = await h.ds.query(
-        `SELECT "passwordHash" FROM users WHERE id = ANY($1::uuid[])`,
-        [userIds],
+        'SELECT "passwordHash" FROM users',
       );
       const secrets = [
         E2E_PASSWORD,
-        'Wrong-Guess-123',
+        wrongGuess,
         ...Object.values(h.tokens),
         ...hashes.map((x) => x.passwordHash),
         validApplicationPayload.ownerTaxId,
-        '999-888-777',
-        validApplicationPayload.ownerEmail,
-        'new@example.com',
+        secretTaxId,
+        '555-444-333',
+        secretEmail,
+        'sweep-new@example.com',
+        'sweep-ghost@example.com',
+        secretPhoneDigits,
         'pat@example.com',
         '9876543210',
+        '999-888-777',
+        'new@example.com',
         'audit table unavailable',
       ];
       const dump = JSON.stringify(rows);

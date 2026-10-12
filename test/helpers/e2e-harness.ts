@@ -12,7 +12,11 @@ import { Role } from '../../src/common/enums/role.enum';
 import { RISK_REVIEW_QUEUE } from '../../src/queue/queue.constants';
 import { RiskProviderClient } from '../../src/risk-review/risk-provider';
 import { User } from '../../src/users/user.entity';
-import { purgeTestData } from './purge-test-data';
+import {
+  assertSafeTestDatabaseName,
+  createDatabaseFromTemplate,
+  dropDatabase,
+} from './test-database';
 
 export type TestUserKey = 'salesA' | 'salesB' | 'admin' | 'rev1' | 'rev2';
 
@@ -69,6 +73,25 @@ export const waitFor = async <T>(
 };
 
 export const createHarness = async (options: HarnessOptions = {}) => {
+  // This test file's own database: a clone of the migrated template. The name
+  // was fixed (and checked) in setup-env.ts, before the app module was imported.
+  const databaseName = assertSafeTestDatabaseName(process.env.E2E_DB_NAME);
+  await createDatabaseFromTemplate(
+    databaseName,
+    assertSafeTestDatabaseName(process.env.E2E_TEMPLATE_DB),
+  );
+
+  try {
+    return await buildHarness(options, databaseName);
+  } catch (error) {
+    // The file's afterAll(close) is never reached when setup itself fails
+    // (the app cannot boot, a login fails, ...): do not leak the database.
+    await dropDatabase(databaseName).catch(() => undefined);
+    throw error;
+  }
+};
+
+const buildHarness = async (options: HarnessOptions, databaseName: string) => {
   let builder = Test.createTestingModule({ imports: [AppModule] });
   if (options.riskProvider) {
     builder = builder
@@ -80,6 +103,18 @@ export const createHarness = async (options: HarnessOptions = {}) => {
   configureApp(app);
   await app.init();
   const ds = app.get(DataSource);
+
+  // Belt and braces: whatever the configuration said, prove the app is really
+  // connected to the disposable database and not to the dev one.
+  const [{ current_database: connectedTo }] = await ds.query(
+    'SELECT current_database()',
+  );
+  if (connectedTo !== databaseName) {
+    await app.close();
+    throw new Error(
+      `e2e harness is connected to "${connectedTo}", expected "${databaseName}". Aborting before any test runs.`,
+    );
+  }
 
   const tag = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const users = {} as Record<TestUserKey, User>;
@@ -132,18 +167,69 @@ export const createHarness = async (options: HarnessOptions = {}) => {
     return res.body as { id: string };
   };
 
-  /** Tests that create audit rows with no entity (e.g. unknown-email logins) register them here. */
-  const extraCorrelationIds: string[] = [];
+  /**
+   * A brand-new user with their own token, for a describe block that needs a
+   * clean slate (e.g. exact list totals) without depending on what other tests
+   * in the file happened to create for the five standard users.
+   */
+  const createExtraUser = async (role: Role, label = 'extra') => {
+    const repo = ds.getRepository(User);
+    const user = await repo.save(
+      repo.create({
+        email:
+          `${tag}-${label}-${Math.random().toString(36).slice(2, 8)}@example.com`.toLowerCase(),
+        name: label,
+        role,
+        passwordHash: hash,
+        isActive: true,
+      }),
+    );
+    const login = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: user.email, password: E2E_PASSWORD });
+    if (login.status !== 200) {
+      throw new Error(`harness login failed for ${label}: ${login.status}`);
+    }
+    const token = login.body.accessToken as string;
+    const authed = (r: request.Test) =>
+      r.set('Authorization', `Bearer ${token}`);
+    const http = () => request(app.getHttpServer());
+    return {
+      user,
+      token,
+      get: (url: string) => authed(http().get(url)),
+      post: (url: string) => authed(http().post(url)),
+      patch: (url: string) => authed(http().patch(url)),
+      createApplication: async (over: object = {}) => {
+        const res = await authed(http().post('/applications')).send({
+          ...validApplicationPayload,
+          ...over,
+        });
+        if (res.status !== 201) {
+          throw new Error(
+            `createApplication failed: ${res.status} ${JSON.stringify(res.body)}`,
+          );
+        }
+        return res.body as { id: string };
+      },
+    };
+  };
+
+  /**
+   * Empties the data tables (not users, not the migrations table) between
+   * tests that need a blank slate. Not needed for isolation between test FILES:
+   * each has its own database.
+   */
+  const truncateApplicationData = () =>
+    ds.query(
+      'TRUNCATE TABLE merchant_applications, audit_logs RESTART IDENTITY',
+    );
 
   const close = async () => {
-    await purgeTestData(
-      ds,
-      Object.values(users).map((u) => u.id),
-      { correlationIds: extraCorrelationIds },
-    );
-    // Drop this run's Redis keys (the prefix is unique to this test file).
+    // This file's Redis keys, then the app (and its DB pool), then the database.
     await queue.obliterate({ force: true }).catch(() => undefined);
     await app.close();
+    await dropDatabase(databaseName);
   };
 
   return {
@@ -154,7 +240,9 @@ export const createHarness = async (options: HarnessOptions = {}) => {
     as,
     apps,
     queue,
-    extraCorrelationIds,
+    truncateApplicationData,
+    createExtraUser,
+    databaseName,
     createApplication,
     close,
     http: () => request(app.getHttpServer()),
