@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PoliciesModule } from '../policies/policies.module';
 import { AuditModule } from '../audit/audit.module';
+import { RiskReviewModule } from '../risk-review/risk-review.module';
 import { UsersModule } from '../users/users.module';
 import { ApplicationWorkflowService } from './application-workflow.service';
 import { ApplicationsController } from './applications.controller';
@@ -14,6 +15,7 @@ import { MerchantApplication } from './merchant-application.entity';
     PoliciesModule,
     UsersModule,
     AuditModule,
+    RiskReviewModule,
   ],
   controllers: [ApplicationsController],
   providers: [ApplicationsService, ApplicationWorkflowService],

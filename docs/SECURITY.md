@@ -99,7 +99,28 @@ POST /auth/login 401 65ms requestId=<uuid> userId=-
 - `redact()` is the shared helper for any other place that must serialize
   objects, for example audit metadata.
 
-## 5. Authentication notes
+## 5. Risk review (background jobs)
+
+- **Queue payloads hold ids only** (`{ applicationId, run }`). Redis never
+  receives business data, owner contact details or tax ids; the worker reads the
+  application from Postgres.
+- **The provider is sent business facts only** (business type, volume, ticket
+  size, currency, an idempotency key). Owner name, email, phone and tax id are
+  never passed on (data minimization).
+- **Failures store a code, not a message**: `{ failure: { code, attempts } }`.
+  Raw provider error text is logged at `warn` (the simulator's contain nothing
+  sensitive; a real provider's should be reviewed before logging) but never
+  persisted. The failed BullMQ job is kept in Redis for inspection and also
+  holds the error text, so treat Redis as an operational store with the same
+  access controls as the database.
+- **`riskResult` (provider detail) is visible to ADMIN and REVIEWER, on the
+  single-application detail view only.** The sales user sees `riskStatus` and
+  `riskScore` but not flags or the provider reference; lists never include it.
+- **Queue isolation:** `QUEUE_PREFIX` namespaces every Redis key. The test suite
+  uses a unique prefix per run so test jobs can never be picked up by a
+  developer's or an environment's worker.
+
+## 6. Authentication notes
 
 - JWTs are signed with `JWT_SECRET` and expire after `JWT_EXPIRES_IN` seconds.
 - Login failures (unknown email, wrong password, inactive user) return the same
@@ -108,7 +129,7 @@ POST /auth/login 401 65ms requestId=<uuid> userId=-
 - Role and user id are taken from the verified token only, never from the
   request body or headers.
 
-## 6. What production would add
+## 7. What production would add
 
 - **Key management:** keep `FIELD_ENCRYPTION_KEY` in a KMS or secrets manager,
   not a `.env` file; use **envelope encryption** (a KMS-wrapped data key per

@@ -43,3 +43,29 @@ export class RiskReviewNotCompleteError extends DomainError {
     );
   }
 }
+
+/** Only a FAILED risk review of a submitted application can be re-triggered. */
+export class RiskReviewNotRetryableError extends DomainError {
+  readonly status = HttpStatus.CONFLICT;
+  readonly code = 'RISK_REVIEW_NOT_RETRYABLE';
+
+  constructor(riskStatus: RiskStatus, applicationStatus: ApplicationStatus) {
+    super(
+      'Only a failed risk review of a submitted application can be retried',
+      {
+        riskStatus,
+        status: applicationStatus,
+      },
+    );
+  }
+}
+
+/** The review could not be queued; the review is back to FAILED and can be retried again. */
+export class RiskReviewUnavailableError extends DomainError {
+  readonly status = HttpStatus.SERVICE_UNAVAILABLE;
+  readonly code = 'RISK_REVIEW_UNAVAILABLE';
+
+  constructor() {
+    super('The risk review could not be queued right now; try again shortly');
+  }
+}

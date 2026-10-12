@@ -10,6 +10,7 @@ import {
   Query,
 } from '@nestjs/common';
 import {
+  ApiAcceptedResponse,
   ApiBearerAuth,
   ApiCreatedResponse,
   ApiOkResponse,
@@ -87,10 +88,10 @@ export class ApplicationsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<ApplicationResponseDto> {
     const application = await this.applications.findOne(user, id);
-    return ApplicationResponseDto.from(
-      application,
-      this.policy.canViewSensitiveOwnerData(user),
-    );
+    return ApplicationResponseDto.from(application, {
+      revealSensitive: this.policy.canViewSensitiveOwnerData(user),
+      includeRiskDetails: this.policy.canViewRiskDetails(user),
+    });
   }
 
   @Patch(':id')
@@ -146,6 +147,25 @@ export class ApplicationsController {
   ): Promise<ApplicationResponseDto> {
     return ApplicationResponseDto.from(
       await this.workflow.assign(user, id, dto.reviewerId),
+    );
+  }
+
+  @Post(':id/risk-review/retry')
+  @HttpCode(202)
+  @Roles(Role.ADMIN)
+  @ApiOperation({
+    summary: 'Retry a failed risk review (ADMIN only)',
+    description:
+      'Only when the risk review FAILED and the application is SUBMITTED or IN_REVIEW (409 otherwise). Queues a new review and returns immediately with riskStatus PENDING; poll the application for the outcome. 503 if the queue is unavailable (the review stays FAILED and can be retried again).',
+  })
+  @ApiAcceptedResponse({ type: ApplicationResponseDto })
+  @ApiErrorResponses(401, 403, 404, 409, 503)
+  async retryRiskReview(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<ApplicationResponseDto> {
+    return ApplicationResponseDto.from(
+      await this.workflow.retryRiskReview(user, id),
     );
   }
 

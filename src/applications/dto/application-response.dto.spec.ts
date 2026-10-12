@@ -37,7 +37,7 @@ describe('ApplicationResponseDto.from', () => {
   });
 
   it('reveals the full values only when asked to', () => {
-    const dto = ApplicationResponseDto.from(entity, true);
+    const dto = ApplicationResponseDto.from(entity, { revealSensitive: true });
     expect(dto.ownerEmail).toBe('cafe_owner@example.com');
     expect(dto.ownerPhone).toBe('+977 9876543210');
     expect(dto.ownerTaxId).toBe('123-456-789');
@@ -56,11 +56,27 @@ describe('ApplicationResponseDto.from', () => {
     expect(json).not.toContain('123-456-789');
   });
 
+  it('includes riskResult only when risk details are requested', () => {
+    const without = ApplicationResponseDto.from(entity) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(without.riskResult).toBeUndefined();
+    expect(JSON.stringify(without)).not.toContain('riskResult');
+    expect(JSON.stringify(without)).not.toContain('internal-detail');
+
+    const withDetails = ApplicationResponseDto.from(entity, {
+      includeRiskDetails: true,
+    });
+    expect(withDetails.riskResult).toEqual({ provider: 'internal-detail' });
+  });
+
   it('does not expose riskResult or any field outside the explicit list', () => {
     const dto = ApplicationResponseDto.from(entity) as unknown as Record<
       string,
       unknown
     >;
-    expect(dto).not.toHaveProperty('riskResult');
+    // undefined is dropped by JSON, so the key never reaches the client
+    expect(JSON.stringify(dto)).not.toContain('riskResult');
   });
 });

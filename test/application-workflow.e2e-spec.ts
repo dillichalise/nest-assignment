@@ -44,7 +44,7 @@ describe('Application workflow: submit, assign, decide (e2e)', () => {
         .expect(200);
       expect(submitted.body.status).toBe('SUBMITTED');
       expect(submitted.body.submittedAt).toEqual(expect.any(String));
-      expect(submitted.body.riskStatus).toBe('NOT_STARTED');
+      expect(submitted.body.riskStatus).toBe('PENDING');
 
       const assigned = await h
         .as('admin')
@@ -145,7 +145,7 @@ describe('Application workflow: submit, assign, decide (e2e)', () => {
       await h.as('salesA').post('/applications/not-a-uuid/submit').expect(400);
     });
 
-    it('resets the previous risk result when an INFO_REQUESTED application is resubmitted', async () => {
+    it('starts a fresh review (clearing the old result) when an INFO_REQUESTED application is resubmitted', async () => {
       const id = await seed(ApplicationStatus.INFO_REQUESTED, {
         riskStatus: RiskStatus.COMPLETED,
       });
@@ -159,7 +159,7 @@ describe('Application workflow: submit, assign, decide (e2e)', () => {
         .expect(200);
       expect(res.body).toMatchObject({
         status: 'SUBMITTED',
-        riskStatus: 'NOT_STARTED',
+        riskStatus: 'PENDING',
         riskScore: null,
       });
       const row = await h.apps().findOneByOrFail({ id });
@@ -452,7 +452,7 @@ describe('Application workflow: submit, assign, decide (e2e)', () => {
         .expect(200);
       expect(resubmitted.body).toMatchObject({
         status: 'SUBMITTED',
-        riskStatus: 'NOT_STARTED',
+        riskStatus: 'PENDING',
       });
 
       // the reviewer cannot decide until an admin puts it back in review

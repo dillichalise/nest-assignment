@@ -20,9 +20,7 @@ describe('maskTaxId', () => {
 describe('maskEmail', () => {
   it('keeps the first character and the domain', () => {
     expect(maskEmail('user@example.com')).toBe('u***@example.com');
-    expect(maskEmail('owner.user@example.com')).toBe(
-      'o*********@example.com',
-    );
+    expect(maskEmail('owner.user@example.com')).toBe('o*********@example.com');
   });
 
   it('never reveals the local part of short addresses', () => {

@@ -97,6 +97,15 @@ export class MerchantApplication {
   })
   riskStatus!: RiskStatus;
 
+  /**
+   * Counts risk-review requests (every submit and every manual retry). It is
+   * part of the BullMQ job id, so each request gets its own job, and the
+   * worker only applies a result whose run still matches: a job left over from
+   * an earlier submission can never overwrite a newer one.
+   */
+  @Column({ type: 'integer', default: 0 })
+  riskReviewRun!: number;
+
   @Column({ type: 'integer', nullable: true })
   riskScore!: number | null;
 

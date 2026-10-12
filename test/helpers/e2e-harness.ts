@@ -1,12 +1,16 @@
+import { getQueueToken } from '@nestjs/bullmq';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import * as bcrypt from 'bcrypt';
+import { Queue } from 'bullmq';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { MerchantApplication } from '../../src/applications/merchant-application.entity';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/app.setup';
 import { Role } from '../../src/common/enums/role.enum';
+import { RISK_REVIEW_QUEUE } from '../../src/queue/queue.constants';
+import { RiskProviderClient } from '../../src/risk-review/risk-provider';
 import { User } from '../../src/users/user.entity';
 
 export type TestUserKey = 'salesA' | 'salesB' | 'admin' | 'rev1' | 'rev2';
@@ -38,10 +42,39 @@ export const validApplicationPayload = {
  * Boots the real app against the dev database with throwaway users (unique
  * emails, deleted in `close()`).
  */
-export const createHarness = async () => {
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
+/**
+ * To run the real risk-review worker, import './enable-risk-worker' first in
+ * the test file (see that file for why).
+ */
+export interface HarnessOptions {
+  /** Replace the risk provider, e.g. with a ScriptedRiskProvider. */
+  riskProvider?: RiskProviderClient;
+}
+
+/** Polls until `check` returns a truthy value; fails with a clear message on timeout. */
+export const waitFor = async <T>(
+  check: () => Promise<T | false | null | undefined>,
+  { timeoutMs = 8000, intervalMs = 40, what = 'condition' } = {},
+): Promise<T> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+};
+
+export const createHarness = async (options: HarnessOptions = {}) => {
+  let builder = Test.createTestingModule({ imports: [AppModule] });
+  if (options.riskProvider) {
+    builder = builder
+      .overrideProvider(RiskProviderClient)
+      .useValue(options.riskProvider);
+  }
+  const moduleRef = await builder.compile();
   const app: INestApplication = moduleRef.createNestApplication();
   configureApp(app);
   await app.init();
@@ -84,6 +117,7 @@ export const createHarness = async () => {
   };
 
   const apps = () => ds.getRepository(MerchantApplication);
+  const queue = app.get<Queue>(getQueueToken(RISK_REVIEW_QUEUE));
 
   const createApplication = async (who: TestUserKey, over: object = {}) => {
     const res = await as(who)
@@ -113,6 +147,8 @@ export const createHarness = async () => {
         .where('id IN (:...ids)', { ids })
         .execute();
     }
+    // Drop this run's Redis keys (the prefix is unique to this test file).
+    await queue.obliterate({ force: true }).catch(() => undefined);
     await app.close();
   };
 
@@ -123,6 +159,7 @@ export const createHarness = async () => {
     tokens,
     as,
     apps,
+    queue,
     createApplication,
     close,
     http: () => request(app.getHttpServer()),

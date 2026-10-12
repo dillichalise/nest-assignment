@@ -106,6 +106,25 @@ describe('PolicyService', () => {
     });
   });
 
+  describe('risk review', () => {
+    it('only ADMIN may retry a failed review', () => {
+      expect(policy.canManageRiskReview(admin)).toBe(true);
+      for (const who of [salesA, reviewer1]) {
+        expect(policy.canManageRiskReview(who)).toBe(false);
+        expect(() => policy.assertCanManageRiskReview(who)).toThrow(
+          ForbiddenException,
+        );
+      }
+    });
+
+    it('provider detail is for ADMIN and REVIEWER, not for sales', () => {
+      expect(policy.canViewRiskDetails(admin)).toBe(true);
+      expect(policy.canViewRiskDetails(reviewer1)).toBe(true);
+      expect(policy.canViewRiskDetails(salesA)).toBe(false);
+      expect(policy.canViewRiskDetails(salesB)).toBe(false);
+    });
+  });
+
   describe('assign reviewer', () => {
     it('is ADMIN-only', () => {
       expect(policy.canAssignReviewer(admin)).toBe(true);

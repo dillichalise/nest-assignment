@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AuthUser } from '../auth/auth-user.interface';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditRecorder } from '../audit/audit-recorder';
@@ -11,11 +11,19 @@ import {
   UnprocessableError,
 } from '../common/errors/domain.error';
 import { PolicyService } from '../policies/policy.service';
+import {
+  RISK_REVIEWABLE_STATUSES,
+  RiskReviewService,
+} from '../risk-review/risk-review.service';
 import { UsersService } from '../users/users.service';
 import { findIncompleteFields } from './application-completeness';
 import { assertTransition } from './application-state-machine';
 import { applyTransition } from './application-transition';
-import { RiskReviewNotCompleteError } from './application.errors';
+import {
+  RiskReviewNotCompleteError,
+  RiskReviewNotRetryableError,
+  RiskReviewUnavailableError,
+} from './application.errors';
 import { ReviewDecision } from './dto/record-decision.dto';
 import { ApplicationStatus } from './enums/application-status.enum';
 import { RiskStatus } from './enums/risk-status.enum';
@@ -37,6 +45,7 @@ export class ApplicationWorkflowService {
     private readonly policy: PolicyService,
     private readonly users: UsersService,
     private readonly audit: AuditRecorder,
+    private readonly riskReviews: RiskReviewService,
   ) {}
 
   /** SALES (owner) or ADMIN: DRAFT | INFO_REQUESTED -> SUBMITTED. */
@@ -61,16 +70,16 @@ export class ApplicationWorkflowService {
       ApplicationStatus.SUBMITTED,
       {
         submittedAt: new Date(),
-        // Every submission is reviewed from scratch, so a resubmission must not
-        // inherit the previous round's risk result.
-        riskStatus: RiskStatus.NOT_STARTED,
+        // Every submission is reviewed from scratch: clear the previous
+        // round's result, mark the review PENDING and bump the run counter.
+        // All of it is part of the SAME single UPDATE as the status change, so
+        // the application is never SUBMITTED without a pending review.
+        riskStatus: RiskStatus.PENDING,
         riskScore: null,
         riskResult: null,
+        riskReviewRun: () => '"riskReviewRun" + 1',
       },
     );
-
-    // >>> PACK 07 CALL SITE: enqueue the risk-review job for this submission
-    // here (and move riskStatus to PENDING in the same unit of work).
 
     await this.audit.record({
       action: AuditAction.APPLICATION_SUBMITTED,
@@ -79,6 +88,71 @@ export class ApplicationWorkflowService {
       entityId: id,
       metadata: { from: application.status, to: ApplicationStatus.SUBMITTED },
     });
+
+    // Queue the background review AFTER the commit. If queueing fails the
+    // review is marked FAILED (retryable by an admin) and the submission itself
+    // still stands; see RiskReviewService.enqueue for the trade-off.
+    const submitted = await this.repo.findOneByOrFail({ id });
+    await this.riskReviews.enqueue(id, submitted.riskReviewRun);
+
+    return this.repo.findOneByOrFail({ id });
+  }
+
+  /**
+   * ADMIN only. Re-triggers a FAILED risk review, for an application that is
+   * still SUBMITTED or IN_REVIEW. Returns at once with riskStatus PENDING; the
+   * worker does the rest.
+   */
+  async retryRiskReview(
+    user: AuthUser,
+    id: string,
+  ): Promise<MerchantApplication> {
+    this.policy.assertCanManageRiskReview(user);
+
+    const application = await this.loadOrNotFound(id);
+    if (
+      application.riskStatus !== RiskStatus.FAILED ||
+      !RISK_REVIEWABLE_STATUSES.includes(application.status as never)
+    ) {
+      throw new RiskReviewNotRetryableError(
+        application.riskStatus,
+        application.status,
+      );
+    }
+
+    // Compare-and-set: of two concurrent retries only one starts a new run.
+    const result = await this.repo.update(
+      {
+        id,
+        riskStatus: RiskStatus.FAILED,
+        status: In([...RISK_REVIEWABLE_STATUSES]),
+      },
+      {
+        riskStatus: RiskStatus.PENDING,
+        riskScore: null,
+        riskResult: null,
+        riskReviewRun: () => '"riskReviewRun" + 1',
+      },
+    );
+    if (!result.affected) {
+      throw new ConflictError(
+        'Risk review state changed concurrently; reload and retry',
+      );
+    }
+
+    const restarted = await this.repo.findOneByOrFail({ id });
+    await this.audit.record({
+      action: AuditAction.RISK_REVIEW_RETRY_REQUESTED,
+      actor: user,
+      entityType: ENTITY_TYPE,
+      entityId: id,
+      metadata: { run: restarted.riskReviewRun },
+    });
+
+    if (!(await this.riskReviews.enqueue(id, restarted.riskReviewRun))) {
+      // enqueue() already put the review back to FAILED.
+      throw new RiskReviewUnavailableError();
+    }
     return this.repo.findOneByOrFail({ id });
   }
 

@@ -1,7 +1,8 @@
+import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { BullModule } from '@nestjs/bullmq';
 import { RISK_REVIEW_QUEUE } from './queue.constants';
+import { buildRiskReviewJobOptions } from './risk-review-job-options';
 
 @Module({
   imports: [
@@ -12,16 +13,17 @@ import { RISK_REVIEW_QUEUE } from './queue.constants';
           host: config.get<string>('REDIS_HOST', 'localhost'),
           port: Number(config.get('REDIS_PORT', 6379)),
         },
+        // Lets a second environment (e.g. the e2e suite) share one Redis
+        // without its jobs ever reaching another environment's worker.
+        prefix: config.get<string>('QUEUE_PREFIX', 'bull'),
       }),
     }),
-    BullModule.registerQueue({
+    BullModule.registerQueueAsync({
       name: RISK_REVIEW_QUEUE,
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 1000 },
-        removeOnComplete: true,
-        removeOnFail: false,
-      },
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        defaultJobOptions: buildRiskReviewJobOptions(config),
+      }),
     }),
   ],
   exports: [BullModule],

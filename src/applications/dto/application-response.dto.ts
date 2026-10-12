@@ -1,8 +1,15 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { maskEmail, maskPhone, maskTaxId } from '../../common/security/mask';
 import { ApplicationStatus } from '../enums/application-status.enum';
 import { RiskStatus } from '../enums/risk-status.enum';
 import { MerchantApplication } from '../merchant-application.entity';
+
+export interface ResponseOptions {
+  /** Unmasked owner email, phone and tax id (ADMIN, detail view only). */
+  revealSensitive?: boolean;
+  /** `riskResult` (ADMIN and REVIEWER, detail view only). */
+  includeRiskDetails?: boolean;
+}
 
 export class ApplicationResponseDto {
   @ApiProperty({ format: 'uuid' }) id!: string;
@@ -34,6 +41,13 @@ export class ApplicationResponseDto {
   @ApiProperty({ enum: ApplicationStatus }) status!: ApplicationStatus;
   @ApiProperty({ enum: RiskStatus }) riskStatus!: RiskStatus;
   @ApiProperty({ type: Number, nullable: true }) riskScore!: number | null;
+  @ApiPropertyOptional({
+    type: Object,
+    nullable: true,
+    description:
+      'Provider detail (level, flags, reference) or the failure code. Only returned to ADMIN and REVIEWER, on the single-application detail view.',
+  })
+  riskResult?: Record<string, unknown> | null;
   @ApiProperty({ format: 'uuid' }) createdById!: string;
   @ApiProperty({ format: 'uuid', nullable: true }) assignedReviewerId!:
     string | null;
@@ -50,12 +64,19 @@ export class ApplicationResponseDto {
    * Owner email, phone and tax id are MASKED unless `revealSensitive` is true.
    * Callers pass it only for ADMIN on the single-application detail endpoint
    * (PolicyService.canViewSensitiveOwnerData); lists and every write response
-   * stay masked. riskResult is left out until Pack 07 decides who may see
-   * provider details.
+   * stay masked.
+   *
+   * `riskResult` (provider detail) is included only when `includeRiskDetails`
+   * is true: ADMIN and REVIEWER, detail view only
+   * (PolicyService.canViewRiskDetails). The sales user sees the score and
+   * status, not the internals.
    */
   static from(
     a: MerchantApplication,
-    revealSensitive = false,
+    {
+      revealSensitive = false,
+      includeRiskDetails = false,
+    }: ResponseOptions = {},
   ): ApplicationResponseDto {
     const dto = new ApplicationResponseDto();
     dto.id = a.id;
@@ -72,6 +93,9 @@ export class ApplicationResponseDto {
     dto.status = a.status;
     dto.riskStatus = a.riskStatus;
     dto.riskScore = a.riskScore;
+    if (includeRiskDetails) {
+      dto.riskResult = a.riskResult;
+    }
     dto.createdById = a.createdById;
     dto.assignedReviewerId = a.assignedReviewerId;
     dto.decisionReason = a.decisionReason;

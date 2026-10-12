@@ -79,6 +79,25 @@ export class PolicyService {
     return user.role === Role.ADMIN;
   }
 
+  /**
+   * Provider detail (flags, reference) behind a risk score. Reviewers need it
+   * to decide; the sales user who applied does not get to see risk internals.
+   */
+  canViewRiskDetails(user: AuthUser): boolean {
+    return user.role === Role.ADMIN || user.role === Role.REVIEWER;
+  }
+
+  /** Re-triggering a failed risk review is an ADMIN-only operational action. */
+  canManageRiskReview(user: AuthUser): boolean {
+    return user.role === Role.ADMIN;
+  }
+
+  assertCanManageRiskReview(user: AuthUser): void {
+    if (!this.canManageRiskReview(user)) {
+      throw new ForbiddenException('Only an admin may retry a risk review');
+    }
+  }
+
   /** Assigning reviewers is an ADMIN-only operational action. */
   canAssignReviewer(user: AuthUser): boolean {
     return user.role === Role.ADMIN;

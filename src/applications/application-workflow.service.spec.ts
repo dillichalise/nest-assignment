@@ -11,11 +11,14 @@ import {
 } from '../common/errors/domain.error';
 import { PolicyService } from '../policies/policy.service';
 import { User } from '../users/user.entity';
+import { RiskReviewService } from '../risk-review/risk-review.service';
 import { UsersService } from '../users/users.service';
 import { ApplicationWorkflowService } from './application-workflow.service';
 import {
   InvalidStateTransitionError,
   RiskReviewNotCompleteError,
+  RiskReviewNotRetryableError,
+  RiskReviewUnavailableError,
 } from './application.errors';
 import { ReviewDecision } from './dto/record-decision.dto';
 import { ApplicationStatus as S } from './enums/application-status.enum';
@@ -61,6 +64,7 @@ describe('ApplicationWorkflowService', () => {
   };
   let users: { findById: jest.Mock };
   let audit: { record: jest.Mock };
+  let riskReviews: { enqueue: jest.Mock };
   let service: ApplicationWorkflowService;
 
   const reviewerUser = (over: Partial<User> = {}) =>
@@ -74,17 +78,19 @@ describe('ApplicationWorkflowService', () => {
     };
     users = { findById: jest.fn().mockResolvedValue(reviewerUser()) };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    riskReviews = { enqueue: jest.fn().mockResolvedValue(true) };
     service = new ApplicationWorkflowService(
       repo as unknown as Repository<MerchantApplication>,
       new PolicyService(),
       users as unknown as UsersService,
       audit as unknown as AuditRecorder,
+      riskReviews as unknown as RiskReviewService,
     );
   });
 
   describe('submit', () => {
     it.each([S.DRAFT, S.INFO_REQUESTED])(
-      'moves %s to SUBMITTED, resets risk, records audit',
+      'moves %s to SUBMITTED, starts a pending review, records audit',
       async (from) => {
         repo.findOneBy.mockResolvedValue(makeApp({ status: from }));
 
@@ -94,11 +100,13 @@ describe('ApplicationWorkflowService', () => {
         expect(where).toEqual({ id: 'app1', status: from });
         expect(patch).toMatchObject({
           status: S.SUBMITTED,
-          riskStatus: RiskStatus.NOT_STARTED,
+          riskStatus: RiskStatus.PENDING,
           riskScore: null,
           riskResult: null,
         });
         expect(patch.submittedAt).toBeInstanceOf(Date);
+        // Same UPDATE as the status change: bump the run counter atomically.
+        expect(patch.riskReviewRun()).toBe('"riskReviewRun" + 1');
         expect(audit.record).toHaveBeenCalledWith(
           expect.objectContaining({
             action: AuditAction.APPLICATION_SUBMITTED,
@@ -108,6 +116,34 @@ describe('ApplicationWorkflowService', () => {
         );
       },
     );
+
+    it('queues the review for the NEW run, after the status change is committed', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      repo.findOneByOrFail.mockResolvedValue(makeApp({ riskReviewRun: 3 }));
+
+      await service.submit(salesA, 'app1');
+
+      expect(riskReviews.enqueue).toHaveBeenCalledTimes(1);
+      expect(riskReviews.enqueue).toHaveBeenCalledWith('app1', 3);
+      const updateOrder = repo.update.mock.invocationCallOrder[0];
+      const enqueueOrder = riskReviews.enqueue.mock.invocationCallOrder[0];
+      expect(enqueueOrder).toBeGreaterThan(updateOrder);
+    });
+
+    it('still succeeds when the review could not be queued (it is marked FAILED and retryable)', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp());
+      riskReviews.enqueue.mockResolvedValue(false);
+      await expect(service.submit(salesA, 'app1')).resolves.toBeDefined();
+    });
+
+    it.each([
+      ['an invalid transition', makeApp({ status: S.SUBMITTED })],
+      ['another user’s application', makeApp({ createdById: 'other' })],
+    ])('does not queue a review for %s', async (_n, app) => {
+      repo.findOneBy.mockResolvedValue(app);
+      await service.submit(salesA, 'app1').catch(() => undefined);
+      expect(riskReviews.enqueue).not.toHaveBeenCalled();
+    });
 
     it('lets ADMIN submit someone else’s application', async () => {
       repo.findOneBy.mockResolvedValue(makeApp());
@@ -341,6 +377,107 @@ describe('ApplicationWorkflowService', () => {
         'rejected',
       ]);
       expect(audit.record).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('retryRiskReview', () => {
+    const failed = (over: Partial<MerchantApplication> = {}) =>
+      makeApp({
+        status: S.SUBMITTED,
+        riskStatus: RiskStatus.FAILED,
+        riskReviewRun: 1,
+        ...over,
+      });
+
+    it('starts a new run, records audit and queues the job', async () => {
+      repo.findOneBy.mockResolvedValue(failed());
+      repo.findOneByOrFail.mockResolvedValue(
+        failed({ riskStatus: RiskStatus.PENDING, riskReviewRun: 2 }),
+      );
+
+      await service.retryRiskReview(admin, 'app1');
+
+      const [where, patch] = repo.update.mock.calls[0];
+      expect(where).toMatchObject({
+        id: 'app1',
+        riskStatus: RiskStatus.FAILED,
+      });
+      expect(patch).toMatchObject({
+        riskStatus: RiskStatus.PENDING,
+        riskScore: null,
+        riskResult: null,
+      });
+      expect(patch.riskReviewRun()).toBe('"riskReviewRun" + 1');
+      expect(riskReviews.enqueue).toHaveBeenCalledWith('app1', 2);
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.RISK_REVIEW_RETRY_REQUESTED,
+          actor: admin,
+          metadata: { run: 2 },
+        }),
+      );
+    });
+
+    it('also works while IN_REVIEW', async () => {
+      repo.findOneBy.mockResolvedValue(failed({ status: S.IN_REVIEW }));
+      await expect(
+        service.retryRiskReview(admin, 'app1'),
+      ).resolves.toBeDefined();
+    });
+
+    it('is ADMIN-only (403) and checked before anything is loaded', async () => {
+      for (const who of [salesA, rev1]) {
+        await expect(service.retryRiskReview(who, 'app1')).rejects.toThrow(
+          ForbiddenException,
+        );
+      }
+      expect(repo.findOneBy).not.toHaveBeenCalled();
+    });
+
+    it.each([RiskStatus.NOT_STARTED, RiskStatus.PENDING, RiskStatus.COMPLETED])(
+      'rejects a review that is %s with 409',
+      async (riskStatus) => {
+        repo.findOneBy.mockResolvedValue(failed({ riskStatus }));
+        await expect(service.retryRiskReview(admin, 'app1')).rejects.toThrow(
+          RiskReviewNotRetryableError,
+        );
+        expect(riskReviews.enqueue).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([S.DRAFT, S.INFO_REQUESTED, S.APPROVED, S.REJECTED])(
+      'rejects an application that is %s with 409',
+      async (status) => {
+        repo.findOneBy.mockResolvedValue(failed({ status }));
+        await expect(service.retryRiskReview(admin, 'app1')).rejects.toThrow(
+          RiskReviewNotRetryableError,
+        );
+      },
+    );
+
+    it('returns 404 for a missing application', async () => {
+      repo.findOneBy.mockResolvedValue(null);
+      await expect(service.retryRiskReview(admin, 'nope')).rejects.toThrow(
+        NotFoundError,
+      );
+    });
+
+    it('returns 409 when a concurrent retry already restarted it (0 rows updated)', async () => {
+      repo.findOneBy.mockResolvedValue(failed());
+      repo.update.mockResolvedValue({ affected: 0 });
+      await expect(service.retryRiskReview(admin, 'app1')).rejects.toThrow(
+        ConflictError,
+      );
+      expect(riskReviews.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('answers 503 when the queue is unavailable', async () => {
+      repo.findOneBy.mockResolvedValue(failed());
+      repo.findOneByOrFail.mockResolvedValue(failed({ riskReviewRun: 2 }));
+      riskReviews.enqueue.mockResolvedValue(false);
+      const err = await service.retryRiskReview(admin, 'app1').catch((e) => e);
+      expect(err).toBeInstanceOf(RiskReviewUnavailableError);
+      expect(err.status).toBe(503);
     });
   });
 });
