@@ -12,11 +12,16 @@ export interface ResponseOptions {
 }
 
 export class ApplicationResponseDto {
-  @ApiProperty({ format: 'uuid' }) id!: string;
-  @ApiProperty() businessName!: string;
-  @ApiProperty() legalBusinessName!: string;
-  @ApiProperty() businessType!: string;
-  @ApiProperty() ownerName!: string;
+  @ApiProperty({
+    format: 'uuid',
+    example: '3b1f6c0e-8a2d-4f6e-9a47-2d3c5e7f9a10',
+  })
+  id!: string;
+  @ApiProperty({ example: 'Blue Door Cafe' }) businessName!: string;
+  @ApiProperty({ example: 'Blue Door Hospitality' })
+  legalBusinessName!: string;
+  @ApiProperty({ example: 'restaurant' }) businessType!: string;
+  @ApiProperty({ example: 'Pat Owner' }) ownerName!: string;
   @ApiProperty({
     example: 'p**@example.com',
     description:
@@ -38,9 +43,22 @@ export class ApplicationResponseDto {
   @ApiProperty({ type: String, example: '25000.00' }) monthlyVolume!: string;
   @ApiProperty({ type: String, example: '42.50' }) averageTicketSize!: string;
   @ApiProperty({ example: 'USD' }) currency!: string;
-  @ApiProperty({ enum: ApplicationStatus }) status!: ApplicationStatus;
-  @ApiProperty({ enum: RiskStatus }) riskStatus!: RiskStatus;
-  @ApiProperty({ type: Number, nullable: true }) riskScore!: number | null;
+  @ApiProperty({
+    enum: ApplicationStatus,
+    example: ApplicationStatus.SUBMITTED,
+  })
+  status!: ApplicationStatus;
+  @ApiProperty({ enum: RiskStatus, example: RiskStatus.COMPLETED })
+  riskStatus!: RiskStatus;
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    minimum: 0,
+    maximum: 99,
+    example: 42,
+    description: '0 (safest) to 99; null until the risk review completes.',
+  })
+  riskScore!: number | null;
   @ApiPropertyOptional({
     type: Object,
     nullable: true,
@@ -48,14 +66,33 @@ export class ApplicationResponseDto {
       'Provider detail (level, flags, reference) or the failure code. Only returned to ADMIN and REVIEWER, on the single-application detail view.',
   })
   riskResult?: Record<string, unknown> | null;
-  @ApiProperty({ format: 'uuid' }) createdById!: string;
+  @ApiProperty({
+    format: 'uuid',
+    description: 'The user who created the application.',
+  })
+  createdById!: string;
   @ApiProperty({ format: 'uuid', nullable: true }) assignedReviewerId!:
     string | null;
-  @ApiProperty({ type: String, nullable: true }) decisionReason!: string | null;
-  @ApiProperty({ type: Date, nullable: true }) decidedAt!: Date | null;
-  @ApiProperty({ type: Date, nullable: true }) submittedAt!: Date | null;
-  @ApiProperty() createdAt!: Date;
-  @ApiProperty() updatedAt!: Date;
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: 'Business could not be verified.',
+  })
+  decisionReason!: string | null;
+  @ApiProperty({
+    type: Date,
+    nullable: true,
+    example: '2026-01-02T10:15:00.000Z',
+  })
+  decidedAt!: Date | null;
+  @ApiProperty({
+    type: Date,
+    nullable: true,
+    example: '2026-01-02T09:00:00.000Z',
+  })
+  submittedAt!: Date | null;
+  @ApiProperty({ example: '2026-01-02T08:30:00.000Z' }) createdAt!: Date;
+  @ApiProperty({ example: '2026-01-02T09:00:00.000Z' }) updatedAt!: Date;
 
   /**
    * The single place entities become API output. Explicit field list (not a

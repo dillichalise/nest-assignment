@@ -9,8 +9,14 @@ import { HealthResponseDto } from './health-response.dto';
 @Controller('health')
 export class HealthController {
   @Get()
-  @ApiOperation({ summary: 'Service health check' })
-  @ApiOkResponse({ type: HealthResponseDto })
+  @ApiOperation({
+    summary: 'Service health check',
+    description: 'Needs no token. Answers 200 while the process is up.',
+  })
+  @ApiOkResponse({
+    type: HealthResponseDto,
+    description: 'The service is running.',
+  })
   @ApiErrorResponses(500)
   check(): HealthResponseDto {
     return {

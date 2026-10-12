@@ -82,6 +82,7 @@ starts with `import './helpers/enable-risk-worker';` (it must be the first impor
 | `risk-review.e2e-spec.ts` | the real BullMQ worker: retries, final failure, idempotency, stale runs, retry endpoint |
 | `audit-trail.e2e-spec.ts` | one row per action, same-transaction rollback in both directions, append-only, no secrets |
 | `sensitive-data.e2e-spec.ts` | masking, encryption at rest, tamper detection |
+| `swagger.e2e-spec.ts` | the API documentation itself: every operation described, tagged and secured as enforced, and every request example accepted by the real validation |
 | `infrastructure.e2e-spec.ts` | the guarantees above |
 
 ### Adding an endpoint

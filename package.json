@@ -1,7 +1,7 @@
 {
   "name": "nest-project",
   "version": "1.0.0",
-  "description": "",
+  "description": "Merchant onboarding API: applications, reviewer assignment, async risk review and an append-only audit trail.",
   "main": "dist/main.js",
   "scripts": {
     "build": "nest build",
@@ -25,7 +25,7 @@
     "test:e2e:random": "jest --config ./test/jest-e2e.json --randomize"
   },
   "author": "Dilli Chalise",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "type": "commonjs",
   "dependencies": {
     "@nestjs/bullmq": "^11.0.5",
@@ -101,5 +101,8 @@
       "!**/*.controller.ts",
       "!app.setup.ts"
     ]
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
