@@ -319,31 +319,131 @@ describe('Authentication (e2e)', () => {
           .update({ id: h.users.rev2.id }, { isActive: true });
       }
     });
+  });
 
-    /**
-     * KNOWN LIMITATION, documented rather than hidden. Tokens are stateless: the
-     * guard verifies the signature and expiry but does not look the user up, so a
-     * user deactivated AFTER logging in keeps working on every endpoint except
-     * /auth/me until the token expires (1 hour). Closing the gap means a user
-     * lookup (or a token deny-list) per request. If you change this behaviour,
-     * update this test and docs/SECURITY.md.
-     */
-    it('KNOWN LIMITATION: a deactivated user keeps API access until the token expires', async () => {
+  describe('a token is only as good as the user behind it', () => {
+    // The guard looks the user up on every request: the database, not the token,
+    // says whether they are still allowed in and with which role.
+    const withToken = (token: string) => ({
+      get: (url: string) =>
+        h.http().get(url).set('Authorization', `Bearer ${token}`),
+      post: (url: string) =>
+        h.http().post(url).set('Authorization', `Bearer ${token}`),
+    });
+    const setActive = (id: string, isActive: boolean) =>
+      h.ds.getRepository(User).update({ id }, { isActive });
+    const setRole = (id: string, role: Role) =>
+      h.ds.getRepository(User).update({ id }, { role });
+
+    it('a user deactivated after logging in is refused on every route at once', async () => {
+      const { id } = await h.createApplication('salesA');
       const token = (await login(h.users.rev2.email, E2E_PASSWORD).expect(200))
         .body.accessToken;
-      await h.ds
-        .getRepository(User)
-        .update({ id: h.users.rev2.id }, { isActive: false });
+      await withToken(token).get('/applications').expect(200); // fine while active
+
+      await setActive(h.users.rev2.id, false);
       try {
-        const res = await h
-          .http()
-          .get('/applications')
-          .set('Authorization', `Bearer ${token}`);
-        expect(res.status).toBe(200);
+        const refused = await Promise.all([
+          withToken(token).get('/applications'),
+          withToken(token).get(`/applications/${id}`),
+          withToken(token).get('/auth/me'),
+          withToken(token).post('/applications'),
+        ]);
+        expect(refused.map((r) => r.status)).toEqual([401, 401, 401, 401]);
+
+        // and the answer is the same generic 401 a forged token gets: nothing about the account leaks
+        const forged = await me(
+          `Bearer ${sign(validClaims(), 'not-the-real-secret')}`,
+        ).expect(401);
+        for (const response of refused) {
+          for (const key of ['statusCode', 'error', 'message']) {
+            expect(response.body[key]).toEqual(forged.body[key]);
+          }
+        }
       } finally {
-        await h.ds
-          .getRepository(User)
-          .update({ id: h.users.rev2.id }, { isActive: true });
+        await setActive(h.users.rev2.id, true);
+      }
+    });
+
+    it('reactivating the user makes the very same token work again (nothing was revoked, only checked)', async () => {
+      const token = (await login(h.users.rev2.email, E2E_PASSWORD).expect(200))
+        .body.accessToken;
+      await setActive(h.users.rev2.id, false);
+      await withToken(token).get('/applications').expect(401);
+
+      await setActive(h.users.rev2.id, true);
+
+      await withToken(token).get('/applications').expect(200);
+    });
+
+    it('a user who is deleted is refused on every route', async () => {
+      const doomed = await h.createExtraUser(Role.SALES, 'doomed');
+      await doomed.get('/applications').expect(200);
+
+      await h.ds.getRepository(User).delete({ id: doomed.user.id });
+
+      await doomed.get('/applications').expect(401);
+      await doomed.get('/auth/me').expect(401);
+    });
+
+    it('a promotion takes effect without logging in again', async () => {
+      const { id } = await h.createApplication('salesA');
+      const promoted = await h.createExtraUser(Role.REVIEWER, 'promoted');
+      await promoted.get(`/applications/${id}/audit`).expect(403); // admin-only
+
+      await setRole(promoted.user.id, Role.ADMIN);
+
+      await promoted.get(`/applications/${id}/audit`).expect(200);
+    });
+
+    it('a demotion takes effect at once: an admin who is demoted loses admin rights on the same token', async () => {
+      const { id } = await h.createApplication('salesA');
+      const admin = await h.createExtraUser(Role.ADMIN, 'soon-demoted');
+      await admin.get(`/applications/${id}/audit`).expect(200);
+
+      await setRole(admin.user.id, Role.SALES);
+
+      await admin.get(`/applications/${id}/audit`).expect(403);
+      // and as a SALES user they now see only their own applications: salesA's is hidden
+      await admin.get(`/applications/${id}`).expect(404);
+    });
+
+    it('the claims inside a genuine, unexpired token do not decide authorization', async () => {
+      const { id } = await h.createApplication('salesA');
+      // Correctly signed by the real secret, but claims a role the user does not have.
+      const overclaiming = sign({
+        sub: h.users.salesB.id,
+        email: h.users.salesB.email,
+        role: Role.ADMIN,
+        exp: now() + 3600,
+      });
+
+      await withToken(overclaiming)
+        .get(`/applications/${id}/audit`)
+        .expect(403);
+      const profile = await withToken(overclaiming).get('/auth/me').expect(200);
+      expect(profile.body.role).toBe('SALES');
+    });
+
+    it('a genuinely signed token whose subject is not a uuid is a plain 401, not a server error', async () => {
+      for (const sub of ['not-a-uuid', '1', '', 'x'.repeat(200)]) {
+        const odd = sign({
+          sub,
+          email: 'x@y.co',
+          role: Role.ADMIN,
+          exp: now() + 60,
+        });
+        await withToken(odd).get('/applications').expect(401);
+      }
+    });
+
+    it('does not affect the public routes', async () => {
+      await setActive(h.users.rev2.id, false);
+      try {
+        await h.http().get('/health').expect(200);
+        await login(h.users.salesA.email, E2E_PASSWORD).expect(200);
+      } finally {
+        await setActive(h.users.rev2.id, true);
       }
     });
   });

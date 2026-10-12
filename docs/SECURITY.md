@@ -200,14 +200,18 @@ no retention or archival policy.
 - Login failures (unknown email, wrong password, inactive user) return the same
   generic `401`, and a dummy bcrypt comparison runs for unknown emails so response
   time does not reveal which accounts exist.
-- Role and user id are taken from the verified token only, never from the
-  request body or headers.
-- **Known limitation: tokens are stateless.** The JWT guard verifies signature and
-  expiry but does not look the user up, so a user who is **deactivated after logging
-  in keeps API access (except `/auth/me`) until their token expires** (1 hour). The
-  same applies to a role change. Closing the gap needs a user lookup per request or
-  a token deny-list. A test pins today's behaviour
-  (`authentication.e2e-spec.ts`, "KNOWN LIMITATION"); change both together.
+- The user id comes from the verified token and the role from the database; neither
+  is ever read from a request body, query string or header.
+- **Every request re-checks the user.** A JWT only proves who the user *was* when it
+  was issued, so after verifying its signature and expiry the guard reads the user
+  from the database on every authenticated request. A user who is **deactivated or
+  deleted is refused immediately** (the same generic `401` as a bad token, so nothing
+  reveals the account), and the user's **role and email come from the database, not
+  from the token's claims**, so a promotion or demotion applies on the next request
+  without logging in again. A genuinely signed token that claims `ADMIN` for a SALES
+  user is treated as SALES. A database outage is a server error, never disguised as
+  `401`. Cost: one primary-key read per request; see `docs/DECISIONS.md` §8 for the
+  caching option. Pinned by the "a token is only as good as the user behind it" tests.
 - Forged, expired, tampered, unsigned (`alg: none`) and asymmetric (RS256) tokens are
   all rejected, and identity is never read from a body, query string or header.
 

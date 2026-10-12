@@ -14,7 +14,7 @@ named here rather than hidden.
 | 5 | A simulator behind a provider interface | [link](#5-the-risk-provider-is-a-simulator-behind-an-interface) |
 | 6 | Field-level encryption and masking | [link](#6-the-tax-id-is-encrypted-at-the-field-level-and-masked-in-responses) |
 | 7 | The audit trail lives in Postgres | [link](#7-the-audit-trail-lives-in-postgres-in-the-same-transaction) |
-| 8 | Stateless JWTs (and the gap that leaves) | [link](#8-tokens-are-stateless-jwts) |
+| 8 | Every request re-checks the user behind the token | [link](#8-every-request-re-checks-the-user-behind-the-token) |
 | 9 | One error shape, domain errors | [link](#9-one-error-shape-and-domain-errors-instead-of-http-exceptions) |
 | 10 | Money as decimal strings | [link](#10-money-is-a-decimal-string-never-a-float) |
 | 11 | Migrations only | [link](#11-the-schema-changes-only-through-reviewed-migrations) |
@@ -58,8 +58,8 @@ but the rule is cheap, so I took the stricter option.
    proves the two always agree.
 3. The **services re-check** the same rules, so a new controller cannot skip them.
 
-Identity (id, role) comes only from the verified token, never from a body, query
-string or header.
+Identity comes only from the verified token (the user id) and the database (the
+role), never from a body, query string or header.
 
 **Consequences.** A bug in one layer is usually caught by the next, and rules are
 written once and read in one file. The price is deliberate redundancy: some checks
@@ -174,23 +174,37 @@ store (or an event stream) scales better and isolates failures, at the cost of
 losing the same-transaction guarantee unless an outbox is added. For this scale,
 atomicity in the database seemed worth more.
 
-## 8. Tokens are stateless JWTs
+## 8. Every request re-checks the user behind the token
 
-**Decision.** Login issues an HS256 JWT valid for one hour carrying the user id,
-email and role. The guard verifies signature and expiry and trusts the claims; it
-does not look the user up.
+**Context.** A JWT is stateless: it proves who the user *was* when it was issued.
+Trusting it alone means a user who is deactivated, deleted or demoted after logging
+in keeps their old access until the token expires (one hour here). My first version
+accepted that gap and documented it; I then closed it.
 
-**The gap this leaves.** A user who is **deactivated, or whose role changes, after
-logging in keeps their old access until the token expires** (up to an hour), on
-every endpoint except `/auth/me`, which does check. This is documented in
-`docs/SECURITY.md` and pinned by a test named "KNOWN LIMITATION" so it cannot change
-unnoticed.
+**Decision.** Login still issues an HS256 JWT valid for one hour. The guard verifies
+the signature and expiry (cheap, no I/O) and then **reads the user from the database
+on every authenticated request**:
 
-**Why accept it.** It keeps authentication fast and free of per-request database
-reads, and a one-hour window is a common, bounded trade-off. **Options to close it**,
-cheapest first: a per-request user lookup (one indexed read); a Redis deny-list of
-revoked users, checked by the guard; shorter-lived access tokens with refresh
-tokens.
+* a missing or deactivated user gets the same generic `401` as a bad token, so the
+  response reveals nothing about the account;
+* the role and email on the request come **from the database, not from the token's
+  claims**, so deactivation, deletion, promotion and demotion all apply on the next
+  request; a genuinely signed token that claims `ADMIN` for a SALES user is treated
+  as SALES;
+* a token whose subject is not a UUID is a plain `401`;
+* the lookup sits outside the "invalid token" handler, so a database outage is a
+  server error and not disguised as "unauthorized".
+
+**Consequences.** The gap is closed and tested over real HTTP (and by deliberately
+breaking the guard nine ways, each caught). The cost is one primary-key read per
+authenticated request (two on `/auth/me`), and authentication now needs the
+database, which every endpoint needed anyway. The claims stay in the token for
+clients that decode it, but they are advisory.
+**If that read ever matters:** a cache keyed by user id with a very short TTL (a few
+seconds) would remove most of it, at the price of a matching window in which a
+deactivation is not yet seen; a Redis revocation list is the other route. Neither is
+warranted at this scale. **Alternative:** purely stateless tokens plus short expiry
+and refresh tokens avoids the read but cannot revoke within the token's lifetime.
 
 ## 9. One error shape, and domain errors instead of HTTP exceptions
 
@@ -282,29 +296,27 @@ that is not part of the repository.
 
 In rough priority order.
 
-1. **Close the stateless-token gap** (decision 8): at minimum a per-request user
-   lookup, so deactivating a user takes effect at once.
-2. **Rate limiting and lockout on login.** Every failed attempt currently writes an
+1. **Rate limiting and lockout on login.** Every failed attempt currently writes an
    audit row and costs a bcrypt comparison; both are cheap to abuse.
-3. **A transactional outbox (or a reconciler) for the risk-review queue**
+2. **A transactional outbox (or a reconciler) for the risk-review queue**
    (decision 4), closing the last window where a review can be left `PENDING` with
    no job.
-4. **Key management.** Move `FIELD_ENCRYPTION_KEY` and `JWT_SECRET` into a KMS or
+3. **Key management.** Move `FIELD_ENCRYPTION_KEY` and `JWT_SECRET` into a KMS or
    secrets manager; use envelope encryption; implement key rotation (the `v1`
    prefix was reserved for it); add a production check that rejects weak or example
    `JWT_SECRET` values the way the encryption key is already checked.
-5. **Observability.** Metrics (request rates and latency, queue depth, failed
+4. **Observability.** Metrics (request rates and latency, queue depth, failed
    reviews), distributed tracing keyed on the request id, and alerts on decryption
    failures, repeated `401`s and reviews stuck `PENDING`.
-6. **A tamper-evident audit trail.** Hash-chain the rows, revoke `UPDATE`/`DELETE`
+5. **A tamper-evident audit trail.** Hash-chain the rows, revoke `UPDATE`/`DELETE`
    from the application role, ship to write-once storage, add retention and export,
    and record every ADMIN reveal of unmasked owner data (not done today).
-7. **Deployment.** A multi-stage Dockerfile, running the worker as a separate
+6. **Deployment.** A multi-stage Dockerfile, running the worker as a separate
    deployment, a CI pipeline (lint, unit, e2e against service containers, a
    migration check), and least-privilege database roles.
-8. **A real provider adapter** with idempotency keys, timeouts, circuit breaking and
+7. **A real provider adapter** with idempotency keys, timeouts, circuit breaking and
    webhook handling, plus contract tests against the vendor's sandbox.
-9. **API ergonomics.** Cursor pagination, filtering and sorting on more fields,
+8. **API ergonomics.** Cursor pagination, filtering and sorting on more fields,
    refresh tokens, API versioning, and a generated client from the OpenAPI document.
-10. **Data lifecycle.** Retention limits, and deletion of tax ids for rejected
+9. **Data lifecycle.** Retention limits, and deletion of tax ids for rejected
     applications.

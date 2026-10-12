@@ -151,6 +151,9 @@ review ends `FAILED`, the admin can `POST /applications/{id}/risk-review/retry`.
                              background)
 ```
 
+* **Authentication.** A JWT proves who you were at login; every request then re-checks
+  that the user is still active and takes their *current* role from the database, so
+  deactivating or demoting someone applies immediately.
 * **Roles.** SALES own what they create; ADMIN operates the queue; REVIEWER decides
   only what is assigned to them. ADMIN cannot approve.
 * **Object-level security.** Being allowed to call an endpoint is not enough: a

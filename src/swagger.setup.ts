@@ -35,7 +35,7 @@ export const buildSwaggerDocument = (app: INestApplication): OpenAPIObject =>
         scheme: 'bearer',
         bearerFormat: 'JWT',
         description:
-          'The `accessToken` returned by `POST /auth/login`. Paste only the token, without the word "Bearer". Tokens last one hour.',
+          'The `accessToken` returned by `POST /auth/login`. Paste only the token, without the word "Bearer". Tokens last one hour, but every request also re-checks that the user is still active.',
       })
       .addTag(
         'Auth',

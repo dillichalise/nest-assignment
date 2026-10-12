@@ -4,7 +4,7 @@ import { ErrorResponseDto } from './error-response.dto';
 
 const DESCRIPTIONS: Record<number, string> = {
   400: 'Validation failed. `details` lists every invalid field.',
-  401: 'Missing, malformed, invalid or expired token (or, for login, wrong credentials).',
+  401: 'Missing, malformed, invalid or expired token, or the user was deactivated or deleted (or, for login, wrong credentials).',
   403: 'Your role is not allowed to do this.',
   404: 'Not found, or not visible to you. The two are deliberately indistinguishable.',
   409: 'Conflicts with the current state: an invalid status change, a locked application, a decision already made, or a lost race with another request.',
