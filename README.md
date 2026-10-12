@@ -174,6 +174,8 @@ review ends `FAILED`, the admin can `POST /applications/{id}/risk-review/retry`.
 ```bash
 npm test                  # unit tests: no infrastructure needed, ~5 s
 npm run test:cov          # unit tests with a coverage report
+npm run test:cov:view     # same, then open the HTML report in your browser
+npm run test:cov:serve    # serve the last report at http://localhost:8080
 npm run docker:up         # the end-to-end tests need Postgres and Redis
 npm run test:e2e          # API tests against real Postgres + Redis, ~10 s
 ```
@@ -220,6 +222,7 @@ Unit tests (`*.spec.ts`) sit next to the code they test.
 | `npm run seed` | create the demo users |
 | `npm run format` / `lint` / `lint:check` | Prettier / ESLint with fixes / ESLint check only |
 | `npm test` / `test:cov` | unit tests / with coverage |
+| `npm run test:cov:view` / `test:cov:serve` | coverage report opened in the browser / served at http://localhost:8080 (`coverage/lcov-report/index.html`) |
 | `npm run test:e2e` / `test:e2e:random` | API tests / the same in random order |
 
 ## Configuration
