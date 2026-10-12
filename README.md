@@ -97,66 +97,6 @@ local development only.
    then `POST /applications/{id}/decision` with the *Approve* example.
 7. As the admin, run `GET /applications/{id}/audit` to see the whole history.
 
-### On the command line
-
-The same flow with `curl`. It needs only `node`, which you already have; the
-`json` helper below evaluates an expression on the parsed response (`x`).
-
-```bash
-BASE=http://localhost:5001
-PASSWORD=$(grep '^SEED_PASSWORD=' .env | cut -d= -f2-)
-json() { node -pe "const x=JSON.parse(require('fs').readFileSync(0)); $1"; }
-login() {
-  curl -s -X POST $BASE/auth/login -H 'content-type: application/json' \
-    -d "$(node -e 'console.log(JSON.stringify({email:process.argv[1],password:process.argv[2]}))' "$1" "$PASSWORD")" \
-    | json 'x.accessToken'
-}
-
-# 1. SALES logs in and creates an application
-SALES=$(login sales@example.com)
-ID=$(curl -s -X POST $BASE/applications -H "Authorization: Bearer $SALES" -H 'content-type: application/json' -d '{
-  "businessName": "Blue Door Cafe", "legalBusinessName": "Blue Door Hospitality LLC",
-  "businessType": "restaurant", "ownerName": "Pat Owner", "ownerEmail": "pat@bluedoor.example",
-  "ownerPhone": "+977 9876543210", "ownerTaxId": "123-456-789",
-  "monthlyVolume": 25000, "averageTicketSize": 42.5, "currency": "USD"
-}' | json 'x.id')
-echo "created $ID"
-
-# 2. SALES submits it; a background risk review starts
-curl -s -X POST $BASE/applications/$ID/submit -H "Authorization: Bearer $SALES" | json 'x.status+" / risk "+x.riskStatus'
-# SUBMITTED / risk PENDING
-
-# 3. ADMIN assigns the reviewer (the reviewer's id comes from GET /auth/me)
-ADMIN=$(login admin@example.com)
-REVIEWER=$(login reviewer@example.com)
-REVIEWER_ID=$(curl -s $BASE/auth/me -H "Authorization: Bearer $REVIEWER" | json 'x.id')
-curl -s -X POST $BASE/applications/$ID/assign -H "Authorization: Bearer $ADMIN" \
-  -H 'content-type: application/json' -d "{\"reviewerId\":\"$REVIEWER_ID\"}" | json 'x.status'
-# IN_REVIEW
-
-# 4. The risk review finishes in the background (a few hundred milliseconds)
-until [ "$(curl -s $BASE/applications/$ID -H "Authorization: Bearer $REVIEWER" | json 'x.riskStatus')" = COMPLETED ]; do sleep 1; done
-curl -s $BASE/applications/$ID -H "Authorization: Bearer $REVIEWER" | json '"risk score "+x.riskScore+", "+JSON.stringify(x.riskResult)'
-
-# 5. The assigned REVIEWER decides
-curl -s -X POST $BASE/applications/$ID/decision -H "Authorization: Bearer $REVIEWER" \
-  -H 'content-type: application/json' -d '{"decision":"APPROVED"}' | json 'x.status'
-# APPROVED
-
-# 6. ADMIN reads the audit trail
-curl -s $BASE/applications/$ID/audit -H "Authorization: Bearer $ADMIN" | json 'x.items.map(i => i.action).join("\n")'
-# APPLICATION_CREATED, APPLICATION_SUBMITTED, RISK_REVIEW_STARTED, REVIEWER_ASSIGNED,
-# RISK_REVIEW_COMPLETED, DECISION_RECORDED
-# (REVIEWER_ASSIGNED and RISK_REVIEW_COMPLETED can swap places: the assignment may
-#  happen while the background review is still running)
-```
-
-Things worth trying afterwards: log in as `sales2@example.com` and request the
-application by id (you get a `404`, not a `403`: it is hidden from you); decide as
-the admin (`403`: only the assigned reviewer may); submit it twice (`409`). To see
-retries, set `RISK_SIM_FAILURE_RATE=0.5` in `.env`, restart, and submit again; if a
-review ends `FAILED`, the admin can `POST /applications/{id}/risk-review/retry`.
-
 ## How it works
 
 ```
