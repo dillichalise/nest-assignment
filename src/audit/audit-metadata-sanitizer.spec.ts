@@ -66,6 +66,31 @@ describe('sanitizeAuditMetadata', () => {
       });
     });
 
+    it('masks values under email/phone KEYS even when they do not look like an address or number', () => {
+      // The free-text masker only recognises well-formed values; the key is the
+      // stronger signal, so these must not slip through.
+      const out = sanitizeAuditMetadata({
+        ownerEmail: 'pat@localhost',
+        contactEmail: 'pat at example dot com',
+        phone: '12 345',
+      });
+      expect(out.ownerEmail).toBe('p**@localhost');
+      expect(out.contactEmail).toBe(
+        '*'.repeat('pat at example dot com'.length),
+      );
+      expect(out.phone).not.toBe('12 345');
+      expect(JSON.stringify(out)).not.toContain('pat at example');
+      expect(JSON.stringify(out)).not.toContain('pat@localhost');
+    });
+
+    it('masks phone numbers under phone keys by keeping only the last 4 digits', () => {
+      expect(sanitizeAuditMetadata({ contactPhone: '(555) 010-1234' })).toEqual(
+        {
+          contactPhone: '(***) ***-1234',
+        },
+      );
+    });
+
     it('masks emails and phone numbers inside free text', () => {
       const out = sanitizeAuditMetadata({
         reason:

@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, UnrecoverableError } from 'bullmq';
 import { Repository } from 'typeorm';
@@ -70,7 +71,6 @@ describe('RiskReviewProcessor', () => {
     );
 
   beforeEach(() => {
-    jest.spyOn(console, 'error').mockImplementation();
     repo = { findOneBy: jest.fn().mockResolvedValue(makeApp()) };
     provider = { assess: jest.fn().mockResolvedValue(assessment) };
     reviews = {
@@ -332,7 +332,8 @@ describe('RiskReviewProcessor', () => {
       p: RiskReviewProcessor,
       worker: ReturnType<typeof fakeWorker>,
     ) => {
-      (p as unknown as { _worker: unknown })._worker = worker;
+      // `worker` is WorkerHost's public accessor; shadow it with the fake.
+      Object.defineProperty(p, 'worker', { get: () => worker });
     };
 
     it('applies the configured concurrency and starts the worker', () => {
@@ -364,6 +365,37 @@ describe('RiskReviewProcessor', () => {
         expect(worker.concurrency).toBe(5);
       },
     );
+
+    describe('when things go wrong', () => {
+      let logError: jest.SpyInstance;
+      beforeEach(() => {
+        logError = jest
+          .spyOn(Logger.prototype, 'error')
+          .mockImplementation(() => undefined);
+      });
+      afterEach(() => jest.restoreAllMocks());
+
+      it('logs, and does not crash the app, when the worker loop stops with an error', async () => {
+        const worker = {
+          concurrency: 1,
+          run: jest.fn().mockRejectedValue(new Error('redis connection lost')),
+        };
+        const p = build();
+        attach(p, worker);
+
+        expect(() => p.onApplicationBootstrap()).not.toThrow();
+        await new Promise((resolve) => setImmediate(resolve)); // let the rejection settle
+
+        expect(logError).toHaveBeenCalledTimes(1);
+        expect(logError.mock.calls[0][0]).toContain('redis connection lost');
+      });
+
+      it('logs worker-level errors instead of letting them go unhandled', () => {
+        build().onWorkerError(new Error('stalled job'));
+        expect(logError).toHaveBeenCalledTimes(1);
+        expect(logError.mock.calls[0][0]).toContain('stalled job');
+      });
+    });
 
     it('does not start processing when RISK_REVIEW_WORKER_ENABLED=false', () => {
       const worker = fakeWorker();

@@ -1,5 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { AuthUser } from '../auth/auth-user.interface';
@@ -627,6 +627,116 @@ describe('ApplicationWorkflowService', () => {
       repo.findOneBy.mockResolvedValue(app);
       await act().catch(() => undefined);
       expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('assign: re-assignment racing another change', () => {
+    it('answers 409 and audits nothing when the application left IN_REVIEW in the meantime', async () => {
+      repo.findOneBy.mockResolvedValue(
+        makeApp({ status: S.IN_REVIEW, assignedReviewerId: 'rev1' }),
+      );
+      users.findById.mockResolvedValue(reviewerUser({ id: 'rev2' }));
+      repo.update.mockResolvedValue({ affected: 0 }); // e.g. a decision landed first
+
+      await expect(service.assign(admin, 'app1', 'rev2')).rejects.toThrow(
+        ConflictError,
+      );
+
+      // the update was conditional on the status still being IN_REVIEW
+      expect(repo.update.mock.calls[0][0]).toEqual({
+        id: 'app1',
+        status: S.IN_REVIEW,
+      });
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('decide: which error wins when several rules are broken', () => {
+    const decideOn = (over: Partial<MerchantApplication>) => {
+      repo.findOneBy.mockResolvedValue(
+        makeApp({ assignedReviewerId: 'rev1', ...over }),
+      );
+      return service
+        .decide(rev1, 'app1', ReviewDecision.APPROVED)
+        .catch((e) => e);
+    };
+
+    it.each([S.APPROVED, S.REJECTED, S.SUBMITTED, S.INFO_REQUESTED])(
+      'an application that is %s reports the invalid transition, not a missing risk review',
+      async (status) => {
+        const error = await decideOn({
+          status,
+          riskStatus: RiskStatus.PENDING,
+        });
+
+        expect(error).toBeInstanceOf(InvalidStateTransitionError);
+        expect(error).not.toBeInstanceOf(RiskReviewNotCompleteError);
+        expect(repo.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('only an IN_REVIEW application with an unfinished review reports the missing risk review', async () => {
+      const error = await decideOn({
+        status: S.IN_REVIEW,
+        riskStatus: RiskStatus.PENDING,
+      });
+      expect(error).toBeInstanceOf(RiskReviewNotCompleteError);
+    });
+
+    it('authorization is checked before either: a non-assigned reviewer learns nothing about state', async () => {
+      repo.findOneBy.mockResolvedValue(
+        makeApp({ status: S.APPROVED, assignedReviewerId: 'someone-else' }),
+      );
+      const error = await service
+        .decide(rev1, 'app1', ReviewDecision.APPROVED)
+        .catch((e) => e);
+      expect(error).toBeInstanceOf(NotFoundError);
+    });
+  });
+
+  describe('compare-and-set conditions on the UPDATE itself', () => {
+    it('retry only restarts a review that is STILL failed AND on a still-reviewable application', async () => {
+      repo.findOneBy.mockResolvedValue(
+        makeApp({
+          status: S.SUBMITTED,
+          riskStatus: RiskStatus.FAILED,
+          riskReviewRun: 1,
+        }),
+      );
+      repo.findOneByOrFail.mockResolvedValue(makeApp({ riskReviewRun: 2 }));
+
+      await service.retryRiskReview(admin, 'app1');
+
+      // Between the read above and this write another request may have decided,
+      // restarted or moved the application: the WHERE clause is what makes that safe.
+      expect(repo.update.mock.calls[0][0]).toEqual({
+        id: 'app1',
+        riskStatus: RiskStatus.FAILED,
+        status: In([S.SUBMITTED, S.IN_REVIEW]),
+      });
+    });
+
+    it('submit and decide are conditional on the status they read', async () => {
+      repo.findOneBy.mockResolvedValue(makeApp({ status: S.INFO_REQUESTED }));
+      await service.submit(salesA, 'app1');
+      expect(repo.update.mock.calls[0][0]).toEqual({
+        id: 'app1',
+        status: S.INFO_REQUESTED,
+      });
+
+      repo.update.mockClear();
+      repo.findOneBy.mockResolvedValue(
+        makeApp({
+          status: S.IN_REVIEW,
+          assignedReviewerId: 'rev1',
+          riskStatus: RiskStatus.COMPLETED,
+        }),
+      );
+      await service.decide(rev1, 'app1', ReviewDecision.APPROVED);
+      expect(repo.update.mock.calls[0][0]).toEqual({
+        id: 'app1',
+        status: S.IN_REVIEW,
+      });
     });
   });
 });

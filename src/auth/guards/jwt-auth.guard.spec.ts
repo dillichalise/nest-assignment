@@ -54,4 +54,69 @@ describe('JwtAuthGuard', () => {
     await expect(guard.canActivate(makeContext(req))).resolves.toBe(true);
     expect(req.user).toEqual({ id: 'u1', email: 'a@b.c', role: Role.REVIEWER });
   });
+
+  describe('identity comes from the verified token and nothing else', () => {
+    const tokenPayload = {
+      sub: 'real-user',
+      email: 'real@example.com',
+      role: Role.SALES,
+    };
+
+    it('ignores a role, id or email smuggled into the body, query, params or headers', async () => {
+      jwt.verifyAsync.mockResolvedValue(tokenPayload);
+      const req: Record<string, unknown> = {
+        headers: {
+          authorization: 'Bearer good',
+          'x-user-role': 'ADMIN',
+          'x-user-id': 'attacker',
+        },
+        body: {
+          role: Role.ADMIN,
+          id: 'attacker',
+          sub: 'attacker',
+          email: 'evil@example.com',
+          user: { role: Role.ADMIN },
+        },
+        query: { role: Role.ADMIN, userId: 'attacker' },
+        params: { role: Role.ADMIN },
+      };
+
+      await guard.canActivate(makeContext(req));
+
+      expect(req.user).toEqual({
+        id: 'real-user',
+        email: 'real@example.com',
+        role: Role.SALES,
+      });
+    });
+
+    it('does not let a pre-set req.user (e.g. from an earlier middleware) survive verification', async () => {
+      jwt.verifyAsync.mockResolvedValue(tokenPayload);
+      const req: Record<string, unknown> = {
+        headers: { authorization: 'Bearer good' },
+        user: { id: 'attacker', email: 'evil@example.com', role: Role.ADMIN },
+      };
+
+      await guard.canActivate(makeContext(req));
+
+      expect(req.user).toEqual({
+        id: 'real-user',
+        email: 'real@example.com',
+        role: Role.SALES,
+      });
+    });
+
+    it('never attaches a user when verification fails', async () => {
+      jwt.verifyAsync.mockRejectedValue(new Error('invalid signature'));
+      const req: Record<string, unknown> = {
+        headers: { authorization: 'Bearer forged' },
+        body: { role: Role.ADMIN },
+      };
+
+      await expect(guard.canActivate(makeContext(req))).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(req.user).toBeUndefined();
+    });
+  });
 });

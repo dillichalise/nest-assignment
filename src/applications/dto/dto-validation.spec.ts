@@ -45,6 +45,15 @@ describe('CreateApplicationDto', () => {
     expect(dto.currency).toBe('USD');
   });
 
+  it.each([123, true, null, {}, ['usd']])(
+    'rejects a non-string currency (%p) instead of crashing the transformer',
+    async (currency) => {
+      await expect(
+        run(CreateApplicationDto, { ...valid, currency }),
+      ).rejects.toThrow(BadRequestException);
+    },
+  );
+
   it('strips workflow fields a client tries to smuggle in', async () => {
     const dto = await run(CreateApplicationDto, {
       ...valid,

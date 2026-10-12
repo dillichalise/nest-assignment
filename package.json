@@ -20,7 +20,8 @@
     "migration:create": "npm run typeorm -- migration:create",
     "migration:run": "npm run typeorm -- -d src/database/data-source.ts migration:run",
     "migration:revert": "npm run typeorm -- -d src/database/data-source.ts migration:revert",
-    "seed": "ts-node src/database/seed.ts"
+    "seed": "ts-node src/database/seed.ts",
+    "test:cov": "jest --coverage"
   },
   "author": "Dilli Chalise",
   "license": "ISC",
@@ -78,6 +79,26 @@
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "setupFilesAfterEnv": [
+      "<rootDir>/../test/jest.setup.ts"
+    ],
+    "coverageDirectory": "../coverage",
+    "collectCoverageFrom": [
+      "**/*.ts",
+      "!**/*.spec.ts",
+      "!main.ts",
+      "!**/*.module.ts",
+      "!**/*.dto.ts",
+      "!**/*.entity.ts",
+      "!**/*.enum.ts",
+      "!**/testing/**",
+      "!**/guards/test-utils.ts",
+      "!database/migrations/**",
+      "!database/seed.ts",
+      "!database/data-source.ts",
+      "!**/*.controller.ts",
+      "!app.setup.ts"
+    ]
   }
 }

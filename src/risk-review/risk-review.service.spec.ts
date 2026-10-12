@@ -1,3 +1,4 @@
+import { In } from 'typeorm';
 import { Queue } from 'bullmq';
 import { ApplicationStatus } from '../applications/enums/application-status.enum';
 import { fakeDataSource } from '../common/testing/fake-data-source';
@@ -15,7 +16,6 @@ describe('RiskReviewService', () => {
   let service: RiskReviewService;
 
   beforeEach(() => {
-    jest.spyOn(console, 'error').mockImplementation();
     queue = { add: jest.fn().mockResolvedValue({}) };
     repo = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
     tx = fakeDataSource(repo);
@@ -96,10 +96,9 @@ describe('RiskReviewService', () => {
       expect(where.id).toBe('app-1');
       expect(where.riskReviewRun).toBe(3);
       expect(where.riskStatus).toBe(RiskStatus.PENDING);
-      expect(where.status._value).toEqual([
-        ApplicationStatus.SUBMITTED,
-        ApplicationStatus.IN_REVIEW,
-      ]);
+      expect(where.status).toEqual(
+        In([ApplicationStatus.SUBMITTED, ApplicationStatus.IN_REVIEW]),
+      );
       expect(patch).toEqual({
         riskStatus: RiskStatus.COMPLETED,
         riskScore: 42,
@@ -214,6 +213,25 @@ describe('RiskReviewService', () => {
       repo.update.mockResolvedValue({ affected: 0 });
       await service.markCompleted('app-1', 1, assessment);
       await service.markFailed('app-1', 1, 'X', 1);
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('enqueue with an unusual failure', () => {
+    it('still compensates when the rejection is not an Error object', async () => {
+      queue.add.mockRejectedValue('connection refused');
+
+      await expect(service.enqueue('app-1', 1)).resolves.toBe(false);
+
+      expect(repo.update.mock.calls[0][1]).toMatchObject({
+        riskStatus: RiskStatus.FAILED,
+        riskResult: { failure: { code: 'ENQUEUE_FAILED', attempts: 0 } },
+      });
+    });
+
+    it('returns true and touches nothing when queueing works', async () => {
+      await expect(service.enqueue('app-1', 1)).resolves.toBe(true);
+      expect(repo.update).not.toHaveBeenCalled();
       expect(audit.record).not.toHaveBeenCalled();
     });
   });

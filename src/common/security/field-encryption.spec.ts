@@ -64,6 +64,31 @@ describe('encryptField / decryptField', () => {
       expect(() => decryptField(`${stored}:extra`, key, CTX)).toThrow();
     });
 
+    it.each([4, 8, 12, 15])(
+      'rejects an authentication tag truncated to %i bytes (weaker than the full 16)',
+      (bytes) => {
+        const parts = encryptField('123-456-789', key, CTX).split(':');
+        // A genuine prefix of the real tag: a well-formed but shortened value.
+        parts[2] = Buffer.from(parts[2], 'base64')
+          .subarray(0, bytes)
+          .toString('base64');
+        expect(() => decryptField(parts.join(':'), key, CTX)).toThrow(
+          'Failed to decrypt field',
+        );
+      },
+    );
+
+    it.each([0, 8, 11, 13, 16, 32])(
+      'rejects an IV of %i bytes (must be exactly 12)',
+      (bytes) => {
+        const parts = encryptField('123-456-789', key, CTX).split(':');
+        parts[1] = randomBytes(bytes).toString('base64');
+        expect(() => decryptField(parts.join(':'), key, CTX)).toThrow(
+          'Failed to decrypt field',
+        );
+      },
+    );
+
     it('rejects the wrong key', () => {
       const stored = encryptField('123-456-789', key, CTX);
       expect(() => decryptField(stored, randomBytes(32), CTX)).toThrow(
@@ -107,6 +132,31 @@ describe('encryptField / decryptField', () => {
       expect(message).not.toContain(key.toString('base64'));
       expect(message).not.toContain(tampered);
     });
+  });
+});
+
+describe('isEncryptedField', () => {
+  it('recognises genuine ciphertext', () => {
+    expect(isEncryptedField(encryptField('123-456-789', key, CTX))).toBe(true);
+  });
+
+  // The backfill migration relies on this to decide which rows still need
+  // encrypting: a false positive would leave plaintext tax ids in the database.
+  it.each([
+    '123-456-789',
+    'PLAINTEXT-LEFTOVER',
+    '',
+    'v1',
+    'v2:aaa:bbb:ccc',
+    ' v1:aaa:bbb:ccc',
+    'xv1:aaa:bbb:ccc',
+    'V1:aaa:bbb:ccc',
+    null,
+    undefined,
+    42,
+    {},
+  ])('does NOT treat %p as encrypted', (value) => {
+    expect(isEncryptedField(value)).toBe(false);
   });
 });
 

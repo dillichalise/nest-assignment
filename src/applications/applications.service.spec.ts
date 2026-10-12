@@ -1,4 +1,4 @@
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AuditAction } from '../audit/audit-action.enum';
 import { AuditRecorder } from '../audit/audit-recorder';
 import { AuthUser } from '../auth/auth-user.interface';
@@ -193,7 +193,7 @@ describe('ApplicationsService', () => {
 
       const [where, patch] = repo.update.mock.calls[0];
       expect(where.id).toBe('app1');
-      expect(where.status._value).toEqual([S.DRAFT, S.INFO_REQUESTED]);
+      expect(where.status).toEqual(In([S.DRAFT, S.INFO_REQUESTED]));
       expect(patch).toEqual({ businessName: 'New' });
     });
 

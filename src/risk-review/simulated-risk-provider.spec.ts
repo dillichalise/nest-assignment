@@ -136,4 +136,19 @@ describe('SimulatedRiskProvider', () => {
       expect(Date.now() - started).toBeGreaterThanOrEqual(55);
     });
   });
+
+  describe('RiskProviderError', () => {
+    it('is retryable unless said otherwise', () => {
+      expect(new RiskProviderError('m', 'CODE').retryable).toBe(true);
+      expect(new RiskProviderError('m', 'CODE', false).retryable).toBe(false);
+    });
+
+    it('carries a code and is identifiable by name', () => {
+      const error = new RiskProviderError('boom', 'PROVIDER_UNAVAILABLE');
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toBe('RiskProviderError');
+      expect(error.code).toBe('PROVIDER_UNAVAILABLE');
+      expect(error.message).toBe('boom');
+    });
+  });
 });

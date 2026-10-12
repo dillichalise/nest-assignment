@@ -115,6 +115,46 @@ describe('AuthService', () => {
     );
   });
 
+  describe('timing: unknown emails cost the same as wrong passwords', () => {
+    // `import * as bcrypt` is a frozen namespace; spy on the real module object,
+    // which the service's namespace import reads through.
+    const rawBcrypt = jest.requireActual<typeof bcrypt>('bcrypt');
+    const BCRYPT_HASH = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
+
+    afterEach(() => jest.restoreAllMocks());
+
+    it('still runs bcrypt against a real hash when the email is unknown', async () => {
+      const compare = jest.spyOn(rawBcrypt, 'compare');
+      users.findByEmailWithPassword.mockResolvedValue(null);
+
+      await service
+        .login('nobody@example.com', 'whatever')
+        .catch(() => undefined);
+
+      // Skipping the comparison would make unknown emails answer measurably
+      // faster, letting an attacker discover which accounts exist.
+      expect(compare).toHaveBeenCalledTimes(1);
+      expect(compare.mock.calls[0][0]).toBe('whatever');
+      expect(compare.mock.calls[0][1]).toMatch(BCRYPT_HASH);
+    });
+
+    it('runs exactly one comparison in every case', async () => {
+      const compare = jest.spyOn(rawBcrypt, 'compare');
+      for (const found of [null, user, { ...user, isActive: false }]) {
+        users.findByEmailWithPassword.mockResolvedValue(found as User | null);
+        await service.login(user.email, password).catch(() => undefined);
+      }
+      expect(compare).toHaveBeenCalledTimes(3);
+    });
+
+    it('compares against the real hash when the user exists', async () => {
+      const compare = jest.spyOn(rawBcrypt, 'compare');
+      users.findByEmailWithPassword.mockResolvedValue(user);
+      await service.login(user.email, password);
+      expect(compare.mock.calls[0][1]).toBe(user.passwordHash);
+    });
+  });
+
   describe('audit trail', () => {
     const auditedActions = () => audit.record.mock.calls.map(([e]) => e.action);
 

@@ -147,6 +147,33 @@ describe('PolicyService', () => {
     });
   });
 
+  describe('decide: the role matters, not only the assignment', () => {
+    it('an ADMIN whose id happens to be the assigned reviewer id still cannot decide', () => {
+      // Inconsistent data (assign() only accepts REVIEWERs), but the rule must not
+      // depend on that: only the REVIEWER role may decide, and only if assigned.
+      const assignedToAdmin: ApplicationAccessSubject = {
+        createdById: 'salesA',
+        assignedReviewerId: 'admin',
+      };
+      expect(policy.canDecideApplication(admin, assignedToAdmin)).toBe(false);
+      expect(() => policy.assertCanDecide(admin, assignedToAdmin)).toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('a SALES owner whose id matches the assignment cannot decide either', () => {
+      const assignedToSales: ApplicationAccessSubject = {
+        createdById: 'salesA',
+        assignedReviewerId: 'salesA',
+      };
+      expect(policy.canDecideApplication(salesA, assignedToSales)).toBe(false);
+    });
+
+    it('a reviewer who is assigned CAN decide (the only path to true)', () => {
+      expect(policy.canDecideApplication(reviewer1, app)).toBe(true);
+    });
+  });
+
   describe('assert* denial convention', () => {
     it('view/edit denial is a 404 so existence is not leaked', () => {
       expect(() => policy.assertCanView(salesB, app)).toThrow(NotFoundError);
@@ -159,6 +186,27 @@ describe('PolicyService', () => {
         ForbiddenException,
       );
       expect(() => policy.assertCanDecide(reviewer1, app)).not.toThrow();
+    });
+  });
+
+  describe('an unrecognised role gets nothing (fails closed)', () => {
+    const ghost = { id: 'ghost', email: 'g@x', role: 'GHOST' as Role };
+
+    it('cannot view, edit, decide, assign, read audit, risk details or sensitive data', () => {
+      expect(policy.canViewApplication(ghost, app)).toBe(false);
+      expect(policy.canEditApplication(ghost, app)).toBe(false);
+      expect(policy.canDecideApplication(ghost, app)).toBe(false);
+      expect(policy.canAssignReviewer(ghost)).toBe(false);
+      expect(policy.canManageRiskReview(ghost)).toBe(false);
+      expect(policy.canViewAuditTrail(ghost)).toBe(false);
+      expect(policy.canViewRiskDetails(ghost)).toBe(false);
+      expect(policy.canViewSensitiveOwnerData(ghost)).toBe(false);
+    });
+
+    it('is told the application does not exist rather than that it is forbidden', () => {
+      expect(() => policy.assertCanView(ghost, app)).toThrow(NotFoundError);
+      expect(() => policy.assertCanEdit(ghost, app)).toThrow(NotFoundError);
+      expect(() => policy.assertCanDecide(ghost, app)).toThrow(NotFoundError);
     });
   });
 });
